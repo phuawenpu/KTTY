@@ -68,3 +68,7 @@ android-studio/
 chromium-wrapper.sh
 .claude/
 .claude.json
+.dartServer/
+
+# Rust build artifacts
+backend/target/

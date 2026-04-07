@@ -104,49 +104,23 @@ class WebSocketService {
     _reconnectTimer = null;
   }
 
-  /// Perform full handshake: join room + ML-KEM key exchange.
+  /// Join room and establish connection.
+  /// TODO: Re-enable ML-KEM handshake once flutter_rust_bridge crypto FFI is implemented.
   Future<void> performHandshake(String pin) async {
     _lastPin = pin;
     final roomId = await PinUtils.hashPin(pin);
 
-    // 1. Send join
+    // Send join
     print('[KTTY-WS] Sending join with room_id: ${roomId.substring(0, 8)}...');
     sendJson({'action': 'join', 'room_id': roomId});
 
-    // 2. Wait for handshake message with ML-KEM public key
-    print('[KTTY-WS] Waiting for handshake offer (30s timeout)...');
-    final handshakeMsg = await messages.firstWhere((msg) {
-      try {
-        final json = jsonDecode(msg) as Map<String, dynamic>;
-        final isHandshake = json['type'] == 'handshake' && json['mlkem_pub_key'] != null;
-        if (!isHandshake) {
-          print('[KTTY-WS] Ignoring non-handshake msg: ${msg.substring(0, msg.length.clamp(0, 60))}');
-        } else {
-          print('[KTTY-WS] Got handshake offer!');
-        }
-        return isHandshake;
-      } catch (_) {
-        return false;
-      }
-    }).timeout(const Duration(seconds: 20));
+    // Plain-text mode — no encryption
+    print('[KTTY-WS] Plain-text mode (no encryption)');
+    _crypto = null;
 
-    final json = jsonDecode(handshakeMsg) as Map<String, dynamic>;
-    final pubKeyB64 = json['mlkem_pub_key'] as String;
-    final pubKey = Uint8List.fromList(base64Decode(pubKeyB64));
-
-    // 3. Encapsulate shared secret
-    final result = HandshakeService.encapsulate(pubKey);
-
-    print('[KTTY-WS] ML-KEM encapsulated. Shared secret: ${result.sharedSecret.sublist(0, 4).map((b) => b.toRadixString(16).padLeft(2, '0')).join()}...');
-
-    // 4. Send ciphertext back
-    sendJson({
-      'type': 'handshake',
-      'mlkem_ciphertext': base64Encode(result.ciphertext),
-    });
-
-    // 5. Establish crypto service with shared secret
-    _crypto = CryptoService(result.sharedSecret);
+    // Wait briefly for agent to detect us and start sending
+    await Future.delayed(const Duration(seconds: 2));
+    print('[KTTY-WS] Ready for PTY data');
   }
 
   /// Send an encrypted envelope.

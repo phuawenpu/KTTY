@@ -92,11 +92,42 @@ impl Session {
         let boot = BootSignal::new();
         ws_tx.send(text_msg(serde_json::to_string(&boot)?)).await?;
 
-        // 4. ML-KEM-768 handshake
-        eprintln!("[agent] Starting ML-KEM handshake...");
-        let shared_secret = self.perform_handshake(&mut ws_tx, &mut ws_rx).await?;
-        eprintln!("[agent] Handshake complete!");
-        let shared_key: [u8; 32] = shared_secret;
+        // 4. Skip ML-KEM handshake for plain-text demo
+        //    TODO: Re-enable once flutter_rust_bridge crypto FFI is implemented
+        eprintln!("[agent] Plain-text mode (no encryption)");
+
+        // Consume handshake messages from Flutter (join notification, handshake offer)
+        // so they don't interfere with the PTY message loop
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let timeout = tokio::time::sleep_until(deadline);
+            tokio::pin!(timeout);
+            tokio::select! {
+                msg = ws_rx.next() => {
+                    match msg {
+                        Some(Ok(Message::Text(ref text))) => {
+                            let t = text.to_string();
+                            eprintln!("[agent] Consuming pre-PTY msg: {}", &t[..t.len().min(60)]);
+                            // Once we see encrypted envelopes (seq field), break
+                            if t.contains("\"seq\"") {
+                                break;
+                            }
+                        }
+                        Some(Ok(Message::Ping(d))) => {
+                            let _ = ws_tx.send(Message::Pong(d)).await;
+                        }
+                        Some(Ok(_)) => continue,
+                        None | Some(Err(_)) => {
+                            return Err(anyhow::anyhow!("WebSocket closed"));
+                        }
+                    }
+                }
+                _ = &mut timeout => {
+                    eprintln!("[agent] Done consuming handshake messages");
+                    break;
+                }
+            }
+        }
 
         // Shared state
         let seq = Arc::new(AtomicU64::new(0));

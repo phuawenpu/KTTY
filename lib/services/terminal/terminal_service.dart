@@ -62,8 +62,9 @@ class TerminalService {
       final json = jsonDecode(raw) as Map<String, dynamic>;
       final type = json['type'] as String?;
 
-      // Skip handshake messages — handled by WebSocketService
-      if (type == 'handshake') return;
+      // Skip handshake and control messages
+      if (type == 'handshake' || type == 'boot') return;
+      if (json['action'] == 'join') return;
 
       if (type == 'pty') {
         final payload = json['payload'] as String;

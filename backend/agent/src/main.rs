@@ -50,26 +50,38 @@ async fn main() -> anyhow::Result<()> {
     eprintln!("Room ID: {room_id}");
 
     // Main loop: spawn PTY, connect, reconnect on disconnect
+    // PTY persists across reconnects; only respawn if shell exits
+    let mut pty_handle: Option<pty::PtyHandle> = None;
+
     loop {
-        eprintln!("Spawning PTY (tmux)...");
-        let pty_handle = match pty::PtyHandle::spawn_tmux(cli.cols, cli.rows) {
-            Ok(h) => h,
-            Err(e) => {
-                eprintln!("Failed to spawn PTY: {e}");
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                continue;
+        // Spawn PTY if we don't have one
+        if pty_handle.is_none() {
+            eprintln!("[agent] Spawning new shell...");
+            match pty::PtyHandle::spawn_tmux(cli.cols, cli.rows) {
+                Ok(h) => pty_handle = Some(h),
+                Err(e) => {
+                    eprintln!("[agent] Failed to spawn PTY: {e}");
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    continue;
+                }
             }
-        };
-
-        eprintln!("Connecting to relay: {}", cli.relay_url);
-        let sess = session::Session::new(cli.relay_url.clone(), derived_key);
-
-        match sess.run(pty_handle).await {
-            Ok(()) => eprintln!("Session ended, reconnecting..."),
-            Err(e) => eprintln!("Session error: {e}, reconnecting..."),
         }
 
-        // Brief delay before reconnect
+        eprintln!("[agent] Connecting to relay: {}", cli.relay_url);
+        let sess = session::Session::new(cli.relay_url.clone(), derived_key);
+
+        match sess.run(pty_handle.take().unwrap()).await {
+            Ok(()) => {
+                eprintln!("[agent] Session ended (shell exited), respawning...");
+                // Shell exited — pty_handle is None, will respawn next iteration
+            }
+            Err(e) => {
+                eprintln!("[agent] Session error: {e}, reconnecting...");
+                // WS error — PTY is gone (moved into session), need new one
+            }
+        }
+
+        // Brief delay before reconnect/respawn
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     }
 }

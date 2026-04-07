@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import '../config/constants.dart';
@@ -27,30 +28,17 @@ class TerminalScreen extends StatefulWidget {
 }
 
 class _TerminalScreenState extends State<TerminalScreen> {
-  bool _resizeSent = false;
-
   @override
   void initState() {
     super.initState();
     SystemChannels.textInput.invokeMethod('TextInput.hide');
-
-    // Send terminal size to agent once xterm calculates it
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      _sendInitialResize();
-    });
-  }
-
-  void _sendInitialResize() {
-    // xterm auto-calculates cols/rows from font size and container
-    // Wait a moment for the layout to settle, then send resize
-    Future.delayed(const Duration(milliseconds: 500), () {
-      final term = widget.terminalService.terminal;
-      final cols = term.viewWidth;
-      final rows = term.viewHeight;
-      if (cols > 0 && rows > 0 && !_resizeSent) {
-        _resizeSent = true;
-        print('[KTTY] Sending initial resize: ${cols}x$rows');
-        widget.terminalService.sendResize(cols, rows);
+    // After first layout, ensure PTY has the correct terminal size.
+    // This catches the case where onResize didn't fire (e.g. size matched default 80x24).
+    SchedulerBinding.instance.addPostFrameCallback((_) {
+      final t = widget.terminalService.terminal;
+      if (t.viewWidth > 0 && t.viewHeight > 0) {
+        print('[KTTY] Post-frame resize: ${t.viewWidth}x${t.viewHeight}');
+        widget.terminalService.sendResize(t.viewWidth, t.viewHeight);
       }
     });
   }

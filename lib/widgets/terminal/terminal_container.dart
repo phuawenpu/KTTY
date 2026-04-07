@@ -1,3 +1,4 @@
+import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:xterm/xterm.dart';
@@ -14,11 +15,15 @@ class TerminalContainer extends StatefulWidget {
 }
 
 class _TerminalContainerState extends State<TerminalContainer> {
-  double _fontSize = 14.0;
+  double _fontSize = _defaultFontSize;
 
   static const double _minFontSize = 6.0;
   static const double _maxFontSize = 24.0;
   static const double _fontStep = 1.0;
+  static const double _defaultFontSize = 14.0;
+  // Approximate ratio: monospace char width ≈ 0.6 * fontSize
+  static const double _charWidthRatio = 0.6;
+  static const int _targetMinCols = 80;
 
   void _zoomIn() {
     setState(() {
@@ -35,23 +40,38 @@ class _TerminalContainerState extends State<TerminalContainer> {
   @override
   Widget build(BuildContext context) {
     final isResizing = context.watch<ViewportState>().isResizing;
+    final charWidth = _charWidthRatio * _fontSize;
+    final minWidth = charWidth * _targetMinCols;
 
     return Stack(
       children: [
-        // Terminal view — autoResize calculates cols/rows from font + container
+        // Terminal view — horizontally scrollable so we can keep a readable
+        // font size while still fitting 80+ columns.
         Container(
           color: Colors.black,
-          child: TerminalView(
-            widget.terminal,
-            controller: widget.controller,
-            readOnly: false,
-            hardwareKeyboardOnly: true,
-            autofocus: false,
-            autoResize: true,
-            textStyle: TerminalStyle(
-              fontSize: _fontSize,
-              fontFamily: 'monospace',
-            ),
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              final terminalWidth = max(constraints.maxWidth, minWidth);
+              return SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: SizedBox(
+                  width: terminalWidth,
+                  height: constraints.maxHeight,
+                  child: TerminalView(
+                    widget.terminal,
+                    controller: widget.controller,
+                    readOnly: false,
+                    hardwareKeyboardOnly: true,
+                    autofocus: false,
+                    autoResize: true,
+                    textStyle: TerminalStyle(
+                      fontSize: _fontSize,
+                      fontFamily: 'monospace',
+                    ),
+                  ),
+                ),
+              );
+            },
           ),
         ),
         // Zoom controls — top right

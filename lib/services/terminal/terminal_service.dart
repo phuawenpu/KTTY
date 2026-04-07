@@ -11,6 +11,8 @@ class TerminalService {
   StreamSubscription? _wsSubscription;
   int _seq = 0;
   bool _plainFallback = false;
+  Timer? _resizeDebounce;
+  bool _firstResize = true;
 
   TerminalService(this._ws)
       : terminal = Terminal(maxLines: kTerminalMaxLines),
@@ -29,6 +31,24 @@ class TerminalService {
     // Terminal output (user keystrokes) → WebSocket
     terminal.onOutput = (data) {
       _sendPty(utf8.encode(data));
+    };
+
+    // Forward terminal resize events to backend PTY.
+    // First resize sent immediately (critical for TUI apps like Claude Code);
+    // subsequent resizes debounced to avoid flooding during drag/zoom.
+    terminal.onResize = (width, height, pixelWidth, pixelHeight) {
+      if (width <= 0 || height <= 0) return;
+      if (_firstResize) {
+        _firstResize = false;
+        print('[KTTY] Initial resize: ${width}x$height');
+        sendResize(width, height);
+        return;
+      }
+      _resizeDebounce?.cancel();
+      _resizeDebounce = Timer(const Duration(milliseconds: 100), () {
+        print('[KTTY] Terminal resized: ${width}x$height');
+        sendResize(width, height);
+      });
     };
 
     // WebSocket → Terminal input
@@ -145,6 +165,8 @@ class TerminalService {
 
   void detach() {
     terminal.onOutput = null;
+    terminal.onResize = null;
+    _resizeDebounce?.cancel();
     _wsSubscription?.cancel();
     _wsSubscription = null;
   }

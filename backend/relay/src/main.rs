@@ -103,12 +103,13 @@ async fn handle_socket(socket: WebSocket, rooms: RoomMap) {
         let mut map = rooms.lock().await;
         let room = map.entry(room_id.clone()).or_insert_with(Room::new);
 
-        // Clean up stale peers (closed channels) before checking capacity
-        room.peers.retain(|p| !p.tx.is_closed());
+        // Clean up stale peers — try sending a ping, evict if it fails
+        room.peers.retain(|p| p.tx.send(Message::Ping(vec![].into())).is_ok());
 
         if room.peers.len() >= 2 {
-            eprintln!("[relay] Room full ({} peers), dropping connection", room.peers.len());
-            return;
+            // Evict the oldest peer to make room
+            eprintln!("[relay] Room full, evicting oldest peer");
+            room.peers.remove(0);
         }
 
         peer_id = room.add_peer(tx);
@@ -160,7 +161,26 @@ async fn handle_socket(socket: WebSocket, rooms: RoomMap) {
     let rooms_read = rooms.clone();
     let room_id_read = room_id.clone();
 
-    while let Some(Ok(msg)) = ws_rx.next().await {
+    loop {
+        let read_timeout = tokio::time::sleep(std::time::Duration::from_secs(30));
+        tokio::pin!(read_timeout);
+
+        let msg = tokio::select! {
+            msg = ws_rx.next() => msg,
+            _ = &mut read_timeout => {
+                eprintln!("[relay] Peer {} timed out (30s idle)", peer_id);
+                break;
+            }
+        };
+
+        let msg = match msg {
+            Some(Ok(m)) => m,
+            _ => {
+                eprintln!("[relay] Peer {} stream ended", peer_id);
+                break;
+            }
+        };
+
         match &msg {
             Message::Close(_) => {
                 eprintln!("[relay] Peer {} sent close", peer_id);
@@ -183,15 +203,17 @@ async fn handle_socket(socket: WebSocket, rooms: RoomMap) {
     }
 
     // Cleanup: remove this peer from the room
+    eprintln!("[relay] Peer {} read loop exited, cleaning up", peer_id);
+    write_task.abort();
     {
         let mut map = rooms.lock().await;
         if let Some(room) = map.get_mut(&room_id) {
             room.peers.retain(|p| p.id != peer_id);
+            eprintln!("[relay] Room now has {} peer(s)", room.peers.len());
             if room.peers.is_empty() {
                 map.remove(&room_id);
+                eprintln!("[relay] Room removed");
             }
         }
     }
-
-    write_task.abort();
 }

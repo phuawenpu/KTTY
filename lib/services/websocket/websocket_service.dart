@@ -114,14 +114,21 @@ class WebSocketService {
     sendJson({'action': 'join', 'room_id': roomId});
 
     // 2. Wait for handshake message with ML-KEM public key
+    print('[KTTY-WS] Waiting for handshake offer (30s timeout)...');
     final handshakeMsg = await messages.firstWhere((msg) {
       try {
         final json = jsonDecode(msg) as Map<String, dynamic>;
-        return json['type'] == 'handshake' && json['mlkem_pub_key'] != null;
+        final isHandshake = json['type'] == 'handshake' && json['mlkem_pub_key'] != null;
+        if (!isHandshake) {
+          print('[KTTY-WS] Ignoring non-handshake msg: ${msg.substring(0, msg.length.clamp(0, 60))}');
+        } else {
+          print('[KTTY-WS] Got handshake offer!');
+        }
+        return isHandshake;
       } catch (_) {
         return false;
       }
-    }).timeout(const Duration(seconds: 10));
+    }).timeout(const Duration(seconds: 30));
 
     final json = jsonDecode(handshakeMsg) as Map<String, dynamic>;
     final pubKeyB64 = json['mlkem_pub_key'] as String;

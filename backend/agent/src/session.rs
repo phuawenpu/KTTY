@@ -60,7 +60,13 @@ impl Session {
                         Some(Ok(Message::Text(ref text))) => {
                             let text_str = text.to_string();
                             eprintln!("[agent] Received: {}", &text_str[..text_str.len().min(80)]);
-                            break;
+                            // Only break on join messages from Flutter client
+                            // Ignore our own echoed messages (boot, handshake)
+                            if text_str.contains("\"action\"") && text_str.contains("\"join\"") {
+                                break;
+                            }
+                            eprintln!("[agent] Ignoring (not a join), continuing to wait...");
+                            continue;
                         }
                         Some(Ok(Message::Pong(_))) => continue,
                         Some(Ok(Message::Ping(d))) => {

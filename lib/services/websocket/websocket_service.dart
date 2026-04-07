@@ -128,7 +128,7 @@ class WebSocketService {
       } catch (_) {
         return false;
       }
-    }).timeout(const Duration(seconds: 30));
+    }).timeout(const Duration(seconds: 20));
 
     final json = jsonDecode(handshakeMsg) as Map<String, dynamic>;
     final pubKeyB64 = json['mlkem_pub_key'] as String;

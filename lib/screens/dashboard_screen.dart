@@ -270,16 +270,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 mainAxisAlignment: MainAxisAlignment.center,
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  const Text(
-                    'Session Dashboard',
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontSize: 24,
-                      fontWeight: FontWeight.bold,
-                    ),
-                    textAlign: TextAlign.center,
+                  Image.asset(
+                    'assets/ktty_logo.png',
+                    height: 120,
                   ),
-                  const SizedBox(height: 32),
+                  const SizedBox(height: 16),
                   TextField(
                     controller: _urlController,
                     focusNode: _urlFocusNode,

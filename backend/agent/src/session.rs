@@ -207,6 +207,7 @@ impl Session {
                         if let Ok(resize) =
                             serde_json::from_slice::<ResizePayload>(&plaintext)
                         {
+                            eprintln!("[agent] Resize: {}x{}", resize.cols, resize.rows);
                             let pw = pty_write_b.lock().await;
                             let _ = pw.resize(resize.cols, resize.rows);
                         }

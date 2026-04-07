@@ -272,7 +272,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 children: [
                   Image.asset(
                     'assets/ktty_logo.png',
-                    height: 120,
+                    height: 240,
                   ),
                   const SizedBox(height: 16),
                   TextField(

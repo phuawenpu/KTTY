@@ -27,10 +27,32 @@ class TerminalScreen extends StatefulWidget {
 }
 
 class _TerminalScreenState extends State<TerminalScreen> {
+  bool _resizeSent = false;
+
   @override
   void initState() {
     super.initState();
     SystemChannels.textInput.invokeMethod('TextInput.hide');
+
+    // Send terminal size to agent once xterm calculates it
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _sendInitialResize();
+    });
+  }
+
+  void _sendInitialResize() {
+    // xterm auto-calculates cols/rows from font size and container
+    // Wait a moment for the layout to settle, then send resize
+    Future.delayed(const Duration(milliseconds: 500), () {
+      final term = widget.terminalService.terminal;
+      final cols = term.viewWidth;
+      final rows = term.viewHeight;
+      if (cols > 0 && rows > 0 && !_resizeSent) {
+        _resizeSent = true;
+        print('[KTTY] Sending initial resize: ${cols}x$rows');
+        widget.terminalService.sendResize(cols, rows);
+      }
+    });
   }
 
   void _onKeyPressed(String value) {

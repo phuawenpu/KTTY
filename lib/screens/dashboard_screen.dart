@@ -276,7 +276,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   child: Container(
                     color: const Color(0xFF101721),
                     child: Opacity(
-                      opacity: 0.3,
+                      opacity: 1.0,
                       child: Image.asset(
                         'assets/ktty_logo.png',
                         height: 240,

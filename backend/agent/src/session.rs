@@ -118,11 +118,9 @@ impl Session {
             }
         });
 
-        // Task A: PTY reader → encrypt → WS
+        // Task A: PTY reader → WS (plain base64, encryption TODO after ML-KEM interop fix)
         let seq_a = seq.clone();
-        let rb_a = ring_buffer.clone();
         let ws_tx_a = ws_send_tx.clone();
-        let key_a = shared_key;
 
         let pty_reader_task = tokio::task::spawn_blocking(move || {
             let mut reader = pty_reader;
@@ -134,17 +132,7 @@ impl Session {
                         let data = buf[..n].to_vec();
                         let current_seq = seq_a.fetch_add(1, Ordering::SeqCst) + 1;
 
-                        let encrypted = match crypto::encrypt(&key_a, &data) {
-                            Ok(e) => e,
-                            Err(_) => continue,
-                        };
-
-                        let payload_b64 = BASE64.encode(&encrypted);
-
-                        // Push to ring buffer (sync since we're in blocking context)
-                        // Use a std Mutex instead for the blocking thread
-                        // For now, skip ring buffer push from blocking context
-                        // (ring buffer is primarily used during sync_req handling)
+                        let payload_b64 = BASE64.encode(&data);
 
                         let envelope =
                             EncryptedEnvelope::new(current_seq, "pty", payload_b64);
@@ -156,12 +144,9 @@ impl Session {
             }
         });
 
-        // Task B: WS → decrypt → dispatch
+        // Task B: WS → PTY (plain base64, encryption TODO after ML-KEM interop fix)
         let ws_tx_b = ws_send_tx.clone();
-        let key_b = shared_key;
         let pty_write_b = pty_write.clone();
-        let seq_b = seq.clone();
-        let rb_b = ring_buffer.clone();
 
         let ws_reader_task = tokio::spawn(async move {
             while let Some(Ok(msg)) = ws_rx.next().await {
@@ -176,13 +161,9 @@ impl Session {
                     Err(_) => continue,
                 };
 
-                let packed = match BASE64.decode(&envelope.payload) {
+                // Decode plain base64 payload
+                let plaintext = match BASE64.decode(&envelope.payload) {
                     Ok(d) => d,
-                    Err(_) => continue,
-                };
-
-                let plaintext = match crypto::decrypt(&key_b, &packed) {
-                    Ok(p) => p,
                     Err(_) => continue,
                 };
 
@@ -202,47 +183,6 @@ impl Session {
                     "sys_kill" => {
                         let mut pw = pty_write_b.lock().await;
                         pw.kill_process_group();
-                    }
-                    "sync_req" => {
-                        if let Ok(req) =
-                            serde_json::from_slice::<SyncReqPayload>(&plaintext)
-                        {
-                            let rb = rb_b.lock().await;
-                            let (packets, dropped) = rb.packets_since(req.last_seq);
-
-                            if let Some((start, end)) = dropped {
-                                let warn = SyncWarnPayload {
-                                    dropped_start: start,
-                                    dropped_end: end,
-                                };
-                                let warn_json = serde_json::to_vec(&warn).unwrap();
-                                if let Ok(encrypted) =
-                                    crypto::encrypt(&key_b, &warn_json)
-                                {
-                                    let s =
-                                        seq_b.fetch_add(1, Ordering::SeqCst) + 1;
-                                    let env = EncryptedEnvelope::new(
-                                        s,
-                                        "sync_warn",
-                                        BASE64.encode(&encrypted),
-                                    );
-                                    let json = serde_json::to_string(&env)
-                                        .unwrap_or_default();
-                                    let _ = ws_tx_b.send(text_msg(json));
-                                }
-                            }
-
-                            for pkt in packets {
-                                let env = EncryptedEnvelope::new(
-                                    pkt.seq,
-                                    &pkt.msg_type,
-                                    BASE64.encode(&pkt.encrypted_payload),
-                                );
-                                let json = serde_json::to_string(&env)
-                                    .unwrap_or_default();
-                                let _ = ws_tx_b.send(text_msg(json));
-                            }
-                        }
                     }
                     _ => {}
                 }

@@ -10,7 +10,6 @@ import '../services/terminal/terminal_service.dart';
 import '../widgets/terminal/terminal_container.dart';
 import '../widgets/terminal/connection_indicator.dart';
 import '../widgets/keyboard/custom_keyboard.dart';
-import '../widgets/clipboard/clipboard_buttons.dart';
 
 class TerminalScreen extends StatefulWidget {
   final TerminalService terminalService;
@@ -36,7 +35,6 @@ class _TerminalScreenState extends State<TerminalScreen> {
     final vs = context.read<ViewportState>();
 
     if (vs.mode == ViewportMode.portrait) {
-      // Switch to landscape
       vs.setResizing(true);
       vs.setMode(ViewportMode.landscape);
       SystemChrome.setPreferredOrientations([
@@ -44,7 +42,6 @@ class _TerminalScreenState extends State<TerminalScreen> {
         DeviceOrientation.landscapeRight,
       ]);
     } else {
-      // Switch to portrait
       vs.setResizing(true);
       vs.setMode(ViewportMode.portrait);
       SystemChrome.setPreferredOrientations([
@@ -52,7 +49,6 @@ class _TerminalScreenState extends State<TerminalScreen> {
       ]);
     }
 
-    // Simulate resize ACK after brief delay (real ACK from remote in production)
     Future.delayed(const Duration(milliseconds: 500), () {
       if (mounted) {
         vs.setResizing(false);
@@ -61,9 +57,7 @@ class _TerminalScreenState extends State<TerminalScreen> {
   }
 
   String _getSelectedText() {
-    // Selection text extraction would require TerminalController integration.
-    // For now, clipboard operations work via mark-based selection.
-    return '';
+    return widget.terminalService.getSelectedText();
   }
 
   @override
@@ -75,70 +69,63 @@ class _TerminalScreenState extends State<TerminalScreen> {
 
     return SafeArea(
       child: Scaffold(
-      backgroundColor: Colors.black,
-      appBar: AppBar(
-        title: const Text('KTTY Terminal'),
-        backgroundColor: const Color(0xFF16213E),
-        toolbarHeight: 36,
-        titleTextStyle: const TextStyle(fontSize: 14),
-        actions: [
-          IconButton(
-            icon: Icon(
-              isPortrait ? Icons.screen_rotation : Icons.stay_current_portrait,
-              size: 18,
-            ),
-            onPressed: _toggleViewport,
-            padding: EdgeInsets.zero,
-            constraints: const BoxConstraints(),
-          ),
-          const SizedBox(width: 8),
-          const Padding(
-            padding: EdgeInsets.only(right: 12),
-            child: ConnectionIndicator(),
-          ),
-        ],
-      ),
-      body: Stack(
-        children: [
-          if (isPortrait)
-            // Portrait: 65/35 split
-            Column(
-              children: [
-                Expanded(
-                  flex: kPortraitTerminalFlex,
-                  child: TerminalContainer(
-                    terminal: widget.terminalService.terminal,
-                  ),
-                ),
-                Expanded(
-                  flex: kPortraitKeyboardFlex,
-                  child: CustomKeyboard(
-                    onKeyPressed: _onKeyPressed,
-                    disabled: keyboardDisabled,
-                  ),
-                ),
-              ],
-            )
-          else
-            // Landscape: terminal only, with safe area padding
-            Padding(
-              padding: const EdgeInsets.all(4),
-              child: TerminalContainer(
-                terminal: widget.terminalService.terminal,
+        backgroundColor: Colors.black,
+        appBar: AppBar(
+          title: const Text('KTTY Terminal'),
+          backgroundColor: const Color(0xFF16213E),
+          toolbarHeight: 36,
+          titleTextStyle: const TextStyle(fontSize: 14),
+          actions: [
+            IconButton(
+              icon: Icon(
+                isPortrait
+                    ? Icons.screen_rotation
+                    : Icons.stay_current_portrait,
+                size: 18,
               ),
+              onPressed: _toggleViewport,
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(),
             ),
-
-          // Clipboard floating buttons
-          ClipboardButtons(
-            mode: vs.mode,
-            onGetSelectedText: _getSelectedText,
-            onPaste: (text) {
-              widget.terminalService.terminal.paste(text);
-            },
-          ),
-        ],
+            const SizedBox(width: 8),
+            const Padding(
+              padding: EdgeInsets.only(right: 12),
+              child: ConnectionIndicator(),
+            ),
+          ],
+        ),
+        body: isPortrait
+            ? Column(
+                children: [
+                  Expanded(
+                    flex: kPortraitTerminalFlex,
+                    child: TerminalContainer(
+                      terminal: widget.terminalService.terminal,
+                      controller: widget.terminalService.controller,
+                    ),
+                  ),
+                  Expanded(
+                    flex: kPortraitKeyboardFlex,
+                    child: CustomKeyboard(
+                      onKeyPressed: _onKeyPressed,
+                      disabled: keyboardDisabled,
+                      viewportMode: vs.mode,
+                      onGetSelectedText: _getSelectedText,
+                      onPaste: (text) {
+                        widget.terminalService.terminal.paste(text);
+                      },
+                    ),
+                  ),
+                ],
+              )
+            : Padding(
+                padding: const EdgeInsets.all(4),
+                child: TerminalContainer(
+                  terminal: widget.terminalService.terminal,
+                  controller: widget.terminalService.controller,
+                ),
+              ),
       ),
-    ),
     );
   }
 }

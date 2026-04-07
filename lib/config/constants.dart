@@ -1,8 +1,8 @@
 const int kTerminalMaxLines = 1000;
 const int kDefaultCols = 80;
 const int kDefaultRows = 24;
-const int kPortraitTerminalFlex = 65;
-const int kPortraitKeyboardFlex = 35;
+const int kPortraitTerminalFlex = 62;
+const int kPortraitKeyboardFlex = 38;
 const Duration kPingInterval = Duration(seconds: 5);
 const Duration kPingTimeout = Duration(seconds: 10);
 const Duration kReconnectInitial = Duration(seconds: 1);

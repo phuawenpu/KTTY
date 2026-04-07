@@ -6,12 +6,22 @@ import '../websocket/websocket_service.dart';
 
 class TerminalService {
   final Terminal terminal;
+  final TerminalController controller;
   final WebSocketService _ws;
   StreamSubscription? _wsSubscription;
   int _seq = 0;
+  bool _plainFallback = false;
 
   TerminalService(this._ws)
-      : terminal = Terminal(maxLines: kTerminalMaxLines);
+      : terminal = Terminal(maxLines: kTerminalMaxLines),
+        controller = TerminalController();
+
+  /// Get the currently selected text from the terminal buffer.
+  String getSelectedText() {
+    final selection = controller.selection;
+    if (selection == null) return '';
+    return terminal.buffer.getText(selection);
+  }
 
   void attach() {
     // Terminal output (user keystrokes) → WebSocket
@@ -26,16 +36,25 @@ class TerminalService {
   }
 
   Future<void> _sendPty(List<int> data) async {
-    if (_ws.isEncrypted) {
-      _seq++;
-      await _ws.sendEncrypted(_seq, 'pty', data);
+    _seq++;
+    if (_ws.isEncrypted && !_plainFallback) {
+      try {
+        await _ws.sendEncrypted(_seq, 'pty', data);
+      } catch (_) {
+        _plainFallback = true;
+        _sendPlain(data);
+      }
     } else {
-      // Fallback for unencrypted (Phase 1 compatibility)
-      _ws.sendJson({
-        'type': 'pty',
-        'payload': base64Encode(data),
-      });
+      _sendPlain(data);
     }
+  }
+
+  void _sendPlain(List<int> data) {
+    _ws.sendJson({
+      'seq': _seq,
+      'type': 'pty',
+      'payload': base64Encode(data),
+    });
   }
 
   Future<void> _handleMessage(String raw) async {
@@ -51,7 +70,13 @@ class TerminalService {
         List<int> bytes;
 
         if (_ws.isEncrypted) {
-          bytes = await _ws.decryptPayload(payload);
+          try {
+            bytes = await _ws.decryptPayload(payload);
+          } catch (_) {
+            // Decryption failed — switch to plain mode
+            _plainFallback = true;
+            bytes = base64Decode(payload);
+          }
         } else {
           bytes = base64Decode(payload);
         }

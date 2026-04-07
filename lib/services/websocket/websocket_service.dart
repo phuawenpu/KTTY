@@ -109,6 +109,9 @@ class WebSocketService {
     // 3. Encapsulate shared secret
     final result = HandshakeService.encapsulate(pubKey);
 
+    // Debug: log shared secret
+    print('Flutter shared secret (hex): ${result.sharedSecret.map((b) => b.toRadixString(16).padLeft(2, '0')).join()}');
+
     // 4. Send ciphertext back
     sendJson({
       'type': 'handshake',

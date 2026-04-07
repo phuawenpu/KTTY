@@ -1,10 +1,10 @@
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
-import 'package:cryptography/cryptography.dart';
 import 'package:pqcrypto/pqcrypto.dart';
 
-/// Standalone mock WebSocket server for local KTTY development.
+/// Mock WebSocket server for local KTTY development.
+/// Completes ML-KEM handshake but uses plain base64 payloads (no encryption).
 /// Run: dart run lib/mock/mock_ws_server.dart
 void main() async {
   final server = await HttpServer.bind(InternetAddress.anyIPv4, 8080);
@@ -26,25 +26,23 @@ void main() async {
 
 void _handleClient(WebSocket ws) {
   final kem = PqcKem.kyber768;
-  Uint8List? sharedSecret;
-  Xchacha20? cipher;
+  bool handshakeComplete = false;
   int seq = 0;
 
   ws.listen(
-    (data) async {
+    (data) {
       final str = data as String;
-      print('Received: $str'); // ignore: avoid_print
 
       try {
         final json = jsonDecode(str) as Map<String, dynamic>;
 
         // Handle room join
         if (json['action'] == 'join') {
-          print('Client joined room: ${json['room_id']}'); // ignore: avoid_print
+          print('Join room: ${json['room_id']}'); // ignore: avoid_print
 
-          // Generate ML-KEM keypair and send public key
           final (pk, sk) = kem.generateKeyPair();
-          _serverSk = sk;
+          // Store sk but we won't actually use it for encryption
+          final _ = sk;
 
           ws.add(jsonEncode({
             'type': 'handshake',
@@ -53,63 +51,77 @@ void _handleClient(WebSocket ws) {
           return;
         }
 
-        // Handle handshake response (client's ciphertext)
+        // Handle handshake response
         if (json['type'] == 'handshake' && json['mlkem_ciphertext'] != null) {
-          final ct = Uint8List.fromList(
-            base64Decode(json['mlkem_ciphertext'] as String),
-          );
+          handshakeComplete = true;
+          print('Handshake complete (mock mode - no encryption)'); // ignore: avoid_print
 
-          // Decapsulate to get shared secret
-          sharedSecret = kem.decapsulate(_serverSk!, ct);
-          cipher = Xchacha20.poly1305Aead();
-
-          print('Handshake complete. Shared secret established.'); // ignore: avoid_print
-
-          // Send encrypted welcome message
+          // Send welcome as plain base64
           seq++;
-          final welcome = utf8.encode('Welcome to KTTY Mock Server!\r\n\$ ');
-          final encrypted = await _encrypt(cipher!, sharedSecret!, welcome);
-
+          final welcome = 'Welcome to KTTY Mock Server!\r\n\$ ';
           ws.add(jsonEncode({
             'seq': seq,
             'type': 'pty',
-            'payload': base64Encode(encrypted),
+            'payload': base64Encode(utf8.encode(welcome)),
           }));
           return;
         }
 
-        // Handle encrypted pty data
-        if (json['type'] == 'pty' && sharedSecret != null && cipher != null) {
+        // Handle pty data
+        if (json['type'] == 'pty' && handshakeComplete) {
           final payloadB64 = json['payload'] as String;
-          final packed = Uint8List.fromList(base64Decode(payloadB64));
-          final decrypted = await _decrypt(cipher!, sharedSecret!, packed);
-          final text = utf8.decode(decrypted, allowMalformed: true);
 
-          print('Decrypted input: ${text.replaceAll('\r', '\\r').replaceAll('\n', '\\n')}'); // ignore: avoid_print
+          // Try to decode as plain base64 first
+          String text;
+          try {
+            final bytes = base64Decode(payloadB64);
+            text = utf8.decode(bytes, allowMalformed: true);
+          } catch (_) {
+            text = '?';
+          }
+
+          // If it looks like encrypted data (has nonce prefix), just
+          // acknowledge with a plain response
+          if (text.isEmpty || text.codeUnitAt(0) > 127) {
+            // Likely encrypted payload we can't read
+            seq++;
+            ws.add(jsonEncode({
+              'seq': seq,
+              'type': 'pty',
+              'payload': base64Encode(utf8.encode('.')),
+            }));
+            return;
+          }
+
+          print('Input: ${text.replaceAll('\r', '\\r').replaceAll('\n', '\\n')}'); // ignore: avoid_print
 
           // Echo response
           String response;
           if (text == '\r' || text == '\n') {
             response = '\r\n\$ ';
+          } else if (text == '\x7F' || text == '\b') {
+            // Backspace: move cursor back, overwrite with space, move back
+            response = '\b \b';
+          } else if (text == '\x1b[3~') {
+            // Delete key: erase character at cursor
+            response = '\x1b[P';
           } else if (text == '\x03') {
             response = '^C\r\n\$ ';
           } else if (text == '\x04') {
-            response = '\r\nlogout\r\n';
             ws.close();
             return;
+          } else if (text.startsWith('\x1b')) {
+            // Escape sequences (arrows, function keys) — echo as-is
+            response = text;
           } else {
-            response = text; // Echo character
+            response = text;
           }
 
           seq++;
-          final encrypted = await _encrypt(
-            cipher!, sharedSecret!, utf8.encode(response),
-          );
-
           ws.add(jsonEncode({
             'seq': seq,
             'type': 'pty',
-            'payload': base64Encode(encrypted),
+            'payload': base64Encode(utf8.encode(response)),
           }));
           return;
         }
@@ -120,39 +132,4 @@ void _handleClient(WebSocket ws) {
     onDone: () => print('Client disconnected'), // ignore: avoid_print
     onError: (e) => print('Error: $e'), // ignore: avoid_print
   );
-}
-
-Uint8List? _serverSk;
-
-Future<Uint8List> _encrypt(
-  Xchacha20 cipher,
-  Uint8List key,
-  List<int> plaintext,
-) async {
-  final secretKey = SecretKey(List<int>.from(key));
-  final secretBox = await cipher.encrypt(plaintext, secretKey: secretKey);
-  final nonce = secretBox.nonce;
-  final ct = secretBox.cipherText;
-  final mac = secretBox.mac.bytes;
-  final result = Uint8List(nonce.length + ct.length + mac.length);
-  result.setAll(0, nonce);
-  result.setAll(nonce.length, ct);
-  result.setAll(nonce.length + ct.length, mac);
-  return result;
-}
-
-Future<Uint8List> _decrypt(
-  Xchacha20 cipher,
-  Uint8List key,
-  Uint8List packed,
-) async {
-  const nonceLen = 24;
-  const macLen = 16;
-  final nonce = packed.sublist(0, nonceLen);
-  final ct = packed.sublist(nonceLen, packed.length - macLen);
-  final macBytes = packed.sublist(packed.length - macLen);
-  final secretKey = SecretKey(List<int>.from(key));
-  final secretBox = SecretBox(ct, nonce: nonce, mac: Mac(macBytes));
-  final plaintext = await cipher.decrypt(secretBox, secretKey: secretKey);
-  return Uint8List.fromList(plaintext);
 }

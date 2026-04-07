@@ -1,10 +1,14 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
+import '../config/constants.dart';
 import '../models/connection_state.dart';
 import '../services/websocket/websocket_service.dart';
 import '../services/terminal/terminal_service.dart';
 import '../state/session_state.dart';
+import '../state/keyboard_state.dart';
 import '../widgets/terminal/connection_indicator.dart';
+import '../widgets/keyboard/custom_keyboard.dart';
 
 class DashboardScreen extends StatefulWidget {
   final WebSocketService wsService;
@@ -25,6 +29,91 @@ class _DashboardScreenState extends State<DashboardScreen> {
   final _pinController = TextEditingController();
   bool _connecting = false;
 
+  // Track which field is focused
+  final _urlFocusNode = FocusNode();
+  final _pinFocusNode = FocusNode();
+  TextEditingController? _activeController;
+
+  @override
+  void initState() {
+    super.initState();
+    SystemChannels.textInput.invokeMethod('TextInput.hide');
+
+    _urlFocusNode.addListener(_onUrlFocus);
+    _pinFocusNode.addListener(_onPinFocus);
+
+    // Default focus to URL field
+    _activeController = _urlController;
+  }
+
+  void _onUrlFocus() {
+    if (_urlFocusNode.hasFocus) {
+      setState(() => _activeController = _urlController);
+      context.read<KeyboardState>().setLayer(0); // ABC for URL
+      SystemChannels.textInput.invokeMethod('TextInput.hide');
+    }
+  }
+
+  void _onPinFocus() {
+    if (_pinFocusNode.hasFocus) {
+      setState(() => _activeController = _pinController);
+      context.read<KeyboardState>().setLayer(1); // 123 for PIN
+      SystemChannels.textInput.invokeMethod('TextInput.hide');
+    }
+  }
+
+  void _onKeyPressed(String value) {
+    final controller = _activeController;
+    if (controller == null) return;
+
+    if (value == '\x7F' || value == '\x1b[3~') {
+      // Backspace or Delete
+      final text = controller.text;
+      if (text.isNotEmpty) {
+        final sel = controller.selection;
+        if (sel.isValid && sel.start > 0) {
+          controller.text =
+              text.substring(0, sel.start - 1) + text.substring(sel.start);
+          controller.selection =
+              TextSelection.collapsed(offset: sel.start - 1);
+        } else {
+          controller.text = text.substring(0, text.length - 1);
+          controller.selection =
+              TextSelection.collapsed(offset: controller.text.length);
+        }
+      }
+    } else if (value == '\r' || value == '\n') {
+      // Enter — move to next field or connect
+      if (_activeController == _urlController) {
+        _pinFocusNode.requestFocus();
+      } else {
+        _connect();
+      }
+    } else if (value == '\t') {
+      // Tab — switch fields
+      if (_activeController == _urlController) {
+        _pinFocusNode.requestFocus();
+      } else {
+        _urlFocusNode.requestFocus();
+      }
+    } else if (value.codeUnitAt(0) >= 32) {
+      // Printable character — insert at cursor
+      final text = controller.text;
+      final sel = controller.selection;
+      if (sel.isValid) {
+        controller.text = text.substring(0, sel.start) +
+            value +
+            text.substring(sel.end);
+        controller.selection =
+            TextSelection.collapsed(offset: sel.start + value.length);
+      } else {
+        controller.text += value;
+        controller.selection =
+            TextSelection.collapsed(offset: controller.text.length);
+      }
+    }
+  }
+
   Future<void> _connect() async {
     final session = context.read<SessionState>();
     final url = _urlController.text.trim();
@@ -38,7 +127,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
     session.setStatus(ConnectionStatus.syncing);
 
     try {
-      // Wire connection state changes to session
       widget.wsService.onConnectionChanged = (connected) {
         if (connected) {
           session.setStatus(ConnectionStatus.connected);
@@ -48,8 +136,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
       };
 
       await widget.wsService.connect(url);
-
-      // Perform ML-KEM handshake (join + key exchange)
       await widget.wsService.performHandshake(pin);
 
       widget.terminalService.attach();
@@ -74,6 +160,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
   void dispose() {
     _urlController.dispose();
     _pinController.dispose();
+    _urlFocusNode.dispose();
+    _pinFocusNode.dispose();
     super.dispose();
   }
 
@@ -91,68 +179,98 @@ class _DashboardScreenState extends State<DashboardScreen> {
           ),
         ],
       ),
-      body: Padding(
-        padding: const EdgeInsets.all(24),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            const Text(
-              'Session Dashboard',
-              style: TextStyle(
-                color: Colors.white,
-                fontSize: 24,
-                fontWeight: FontWeight.bold,
-              ),
-              textAlign: TextAlign.center,
-            ),
-            const SizedBox(height: 32),
-            TextField(
-              controller: _urlController,
-              style: const TextStyle(color: Colors.white),
-              decoration: const InputDecoration(
-                labelText: 'WebSocket URL',
-                labelStyle: TextStyle(color: Colors.white54),
-                enabledBorder: OutlineInputBorder(
-                  borderSide: BorderSide(color: Colors.white24),
-                ),
-                focusedBorder: OutlineInputBorder(
-                  borderSide: BorderSide(color: Colors.blueAccent),
-                ),
-              ),
-            ),
-            const SizedBox(height: 16),
-            TextField(
-              controller: _pinController,
-              obscureText: true,
-              style: const TextStyle(color: Colors.white),
-              decoration: const InputDecoration(
-                labelText: 'PIN',
-                labelStyle: TextStyle(color: Colors.white54),
-                enabledBorder: OutlineInputBorder(
-                  borderSide: BorderSide(color: Colors.white24),
-                ),
-                focusedBorder: OutlineInputBorder(
-                  borderSide: BorderSide(color: Colors.blueAccent),
-                ),
-              ),
-            ),
-            const SizedBox(height: 24),
-            ElevatedButton(
-              onPressed: _connecting ? null : _connect,
-              style: ElevatedButton.styleFrom(
-                backgroundColor: const Color(0xFF0F3460),
-                padding: const EdgeInsets.symmetric(vertical: 16),
-              ),
-              child: _connecting
-                  ? const CircularProgressIndicator(color: Colors.white)
-                  : const Text(
-                      'Connect',
-                      style: TextStyle(fontSize: 16, color: Colors.white),
+      body: Column(
+        children: [
+          // Form area: 65%
+          Expanded(
+            flex: kPortraitTerminalFlex,
+            child: Padding(
+              padding: const EdgeInsets.all(24),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  const Text(
+                    'Session Dashboard',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 24,
+                      fontWeight: FontWeight.bold,
                     ),
+                    textAlign: TextAlign.center,
+                  ),
+                  const SizedBox(height: 32),
+                  TextField(
+                    controller: _urlController,
+                    focusNode: _urlFocusNode,
+                    readOnly: true,
+                    showCursor: true,
+                    style: const TextStyle(color: Colors.white),
+                    decoration: InputDecoration(
+                      labelText: 'WebSocket URL',
+                      labelStyle: const TextStyle(color: Colors.white54),
+                      enabledBorder: OutlineInputBorder(
+                        borderSide: BorderSide(
+                          color: _activeController == _urlController
+                              ? Colors.blueAccent
+                              : Colors.white24,
+                        ),
+                      ),
+                      focusedBorder: const OutlineInputBorder(
+                        borderSide: BorderSide(color: Colors.blueAccent),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  TextField(
+                    controller: _pinController,
+                    focusNode: _pinFocusNode,
+                    readOnly: true,
+                    showCursor: true,
+                    obscureText: true,
+                    style: const TextStyle(color: Colors.white),
+                    decoration: InputDecoration(
+                      labelText: 'PIN',
+                      labelStyle: const TextStyle(color: Colors.white54),
+                      enabledBorder: OutlineInputBorder(
+                        borderSide: BorderSide(
+                          color: _activeController == _pinController
+                              ? Colors.blueAccent
+                              : Colors.white24,
+                        ),
+                      ),
+                      focusedBorder: const OutlineInputBorder(
+                        borderSide: BorderSide(color: Colors.blueAccent),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 24),
+                  ElevatedButton(
+                    onPressed: _connecting ? null : _connect,
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF0F3460),
+                      padding: const EdgeInsets.symmetric(vertical: 16),
+                    ),
+                    child: _connecting
+                        ? const CircularProgressIndicator(color: Colors.white)
+                        : const Text(
+                            'Connect',
+                            style:
+                                TextStyle(fontSize: 16, color: Colors.white),
+                          ),
+                  ),
+                ],
+              ),
             ),
-          ],
-        ),
+          ),
+          // Keyboard: 35%
+          Expanded(
+            flex: kPortraitKeyboardFlex,
+            child: CustomKeyboard(
+              onKeyPressed: _onKeyPressed,
+            ),
+          ),
+        ],
       ),
     );
   }

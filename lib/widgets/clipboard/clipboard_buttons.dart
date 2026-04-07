@@ -14,11 +14,16 @@ class ClipboardButtons extends StatelessWidget {
     this.onPaste,
   });
 
-  void _onMarkStart() {
-    // Triggers mark start — future integration with terminal selection
-  }
+  void _onMarkStart() {}
 
   void _onMarkEnd() {
+    final text = onGetSelectedText();
+    if (text.isNotEmpty) {
+      Clipboard.setData(ClipboardData(text: text));
+    }
+  }
+
+  void _onCopy() {
     final text = onGetSelectedText();
     if (text.isNotEmpty) {
       Clipboard.setData(ClipboardData(text: text));
@@ -34,40 +39,29 @@ class ClipboardButtons extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Positioned(
-      right: 8,
-      bottom: 8,
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          _buildButton('Mark\nStart', _onMarkStart),
-          const SizedBox(height: 4),
-          _buildButton('Mark\nEnd', _onMarkEnd),
-          if (mode == ViewportMode.portrait) ...[
-            const SizedBox(height: 4),
-            _buildButton('Paste', _onPaste),
-          ],
-        ],
-      ),
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        _buildIconButton(Icons.start, 'Mark Start', _onMarkStart),
+        _buildIconButton(Icons.last_page, 'Mark End', _onMarkEnd),
+        _buildIconButton(Icons.copy, 'Copy', _onCopy),
+        if (mode == ViewportMode.portrait)
+          _buildIconButton(Icons.paste, 'Paste', _onPaste),
+      ],
     );
   }
 
-  Widget _buildButton(String label, VoidCallback onTap) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-        decoration: BoxDecoration(
-          color: const Color(0xFF2A2A4A).withValues(alpha: 0.9),
-          borderRadius: BorderRadius.circular(6),
-          border: Border.all(color: const Color(0xFF4A4A6A)),
-        ),
-        child: Text(
-          label,
-          textAlign: TextAlign.center,
-          style: const TextStyle(
-            color: Colors.white70,
-            fontSize: 9,
+  Widget _buildIconButton(IconData icon, String tooltip, VoidCallback onTap) {
+    return Tooltip(
+      message: tooltip,
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(4),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+            child: Icon(icon, color: Colors.white54, size: 16),
           ),
         ),
       ),

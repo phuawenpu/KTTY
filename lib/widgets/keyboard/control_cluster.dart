@@ -25,7 +25,7 @@ class ControlCluster extends StatelessWidget {
       child: GestureDetector(
         onTap: onTap,
         child: Container(
-          margin: const EdgeInsets.all(1.5),
+          margin: const EdgeInsets.all(3.0),
           decoration: BoxDecoration(
             color: active ? const Color(0xFF0F3460) : const Color(0xFF2A2A4A),
             borderRadius: BorderRadius.circular(4),
@@ -54,7 +54,7 @@ class ControlCluster extends StatelessWidget {
       child: GestureDetector(
         onTap: () => onKeyPressed(value),
         child: Container(
-          margin: const EdgeInsets.all(1.5),
+          margin: const EdgeInsets.all(3.0),
           decoration: BoxDecoration(
             color: const Color(0xFF2A2A4A),
             borderRadius: BorderRadius.circular(4),
@@ -83,7 +83,7 @@ class ControlCluster extends StatelessWidget {
       child: GestureDetector(
         onTap: () => onKeyPressed(escSeq),
         child: Container(
-          margin: const EdgeInsets.all(1.5),
+          margin: const EdgeInsets.all(3.0),
           decoration: BoxDecoration(
             color: const Color(0xFF2A2A4A),
             borderRadius: BorderRadius.circular(4),
@@ -109,8 +109,8 @@ class ControlCluster extends StatelessWidget {
           _buildKey('Esc', '\x1b'),
           _buildKey('Tab', '\t'),
           _buildModifierKey('Ctrl', ctrlActive, onCtrlToggle),
-          _buildModifierKey('Shift', shiftActive, onShiftToggle),
-          _buildModifierKey('Caps', capsLock, onCapsLockToggle),
+          _buildModifierKey(shiftActive ? 'AB' : 'ab', shiftActive, onShiftToggle),
+          _buildModifierKey(capsLock ? 'AA' : 'Aa', capsLock, onCapsLockToggle),
           _buildArrowKey('Up', '\x1b[A', Icons.arrow_upward),
           _buildArrowKey('Down', '\x1b[B', Icons.arrow_downward),
           _buildArrowKey('Left', '\x1b[D', Icons.arrow_back),

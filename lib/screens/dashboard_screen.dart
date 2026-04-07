@@ -180,9 +180,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
       session.setStatus(ConnectionStatus.relayConnected);
       print('[KTTY] Relay connected. Starting handshake...');
 
-      session.setStatus(ConnectionStatus.handshaking);
+      session.setStatus(ConnectionStatus.waitingForAgent);
       await widget.wsService.performHandshake(pin);
-      print('[KTTY] Handshake complete.');
+      print('[KTTY] Agent found.');
 
       widget.terminalService.attach();
       session.setStatus(ConnectionStatus.connected);
@@ -193,14 +193,39 @@ class _DashboardScreenState extends State<DashboardScreen> {
     } catch (e, st) {
       print('[KTTY] Connection failed: $e');
       print('[KTTY] Stack: ${st.toString().split('\n').take(5).join('\n')}');
+      widget.wsService.disconnect();
       session.setStatus(ConnectionStatus.disconnected);
+
+      // Determine user-friendly error message
+      String errorMsg;
+      if (e.toString().contains('No agent found')) {
+        errorMsg = 'No agent found. Wrong PIN or agent not running.';
+      } else if (e.toString().contains('host lookup')) {
+        errorMsg = 'Cannot reach relay server.';
+      } else if (e.toString().contains('TimeoutException')) {
+        errorMsg = 'Connection timed out. Agent may not be running.';
+      } else {
+        errorMsg = 'Connection failed: $e';
+      }
+
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Connection failed: $e')),
+          SnackBar(
+            content: Text(errorMsg),
+            duration: const Duration(seconds: 4),
+          ),
         );
       }
     } finally {
-      if (mounted) setState(() => _connecting = false);
+      if (mounted) {
+        setState(() => _connecting = false);
+        // 5 second cooldown after failure to prevent rapid retries
+        if (session.status == ConnectionStatus.disconnected) {
+          setState(() => _connecting = true);
+          await Future.delayed(const Duration(seconds: 5));
+          if (mounted) setState(() => _connecting = false);
+        }
+      }
     }
   }
 

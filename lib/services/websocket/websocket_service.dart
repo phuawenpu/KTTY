@@ -104,7 +104,7 @@ class WebSocketService {
     _reconnectTimer = null;
   }
 
-  /// Join room and establish connection.
+  /// Join room and wait for agent to respond.
   /// TODO: Re-enable ML-KEM handshake once flutter_rust_bridge crypto FFI is implemented.
   Future<void> performHandshake(String pin) async {
     _lastPin = pin;
@@ -118,9 +118,32 @@ class WebSocketService {
     print('[KTTY-WS] Plain-text mode (no encryption)');
     _crypto = null;
 
-    // Wait briefly for agent to detect us and start sending
-    await Future.delayed(const Duration(seconds: 2));
-    print('[KTTY-WS] Ready for PTY data');
+    // Wait for agent to send ANY pty data (proves agent is in the same room)
+    print('[KTTY-WS] Waiting for agent response (15s)...');
+    await messages.firstWhere((msg) {
+      try {
+        final json = jsonDecode(msg) as Map<String, dynamic>;
+        final type = json['type'] as String?;
+        if (type == 'pty') {
+          print('[KTTY-WS] Agent responded with PTY data');
+          return true;
+        }
+        if (type == 'boot') {
+          print('[KTTY-WS] Agent sent boot signal');
+          return true;
+        }
+        print('[KTTY-WS] Waiting... got: ${msg.substring(0, msg.length.clamp(0, 50))}');
+        return false;
+      } catch (_) {
+        return false;
+      }
+    }).timeout(
+      const Duration(seconds: 15),
+      onTimeout: () => throw Exception(
+        'No agent found. Check PIN and ensure the host agent is running.',
+      ),
+    );
+    print('[KTTY-WS] Connected to agent');
   }
 
   /// Send an encrypted envelope.

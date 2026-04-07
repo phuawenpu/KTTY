@@ -55,6 +55,7 @@ class _KttyAppState extends State<KttyApp> {
               ),
           '/terminal': (_) => TerminalScreen(
                 terminalService: _terminalService,
+                wsService: _wsService,
               ),
         },
       ),

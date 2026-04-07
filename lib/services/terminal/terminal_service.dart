@@ -23,6 +23,8 @@ class TerminalService {
     return terminal.buffer.getText(selection);
   }
 
+  final _pendingTimestamps = <int, int>{};
+
   void attach() {
     // Terminal output (user keystrokes) → WebSocket
     terminal.onOutput = (data) {
@@ -50,6 +52,7 @@ class TerminalService {
   }
 
   void _sendPlain(List<int> data) {
+    _pendingTimestamps[_seq] = DateTime.now().millisecondsSinceEpoch;
     _ws.sendJson({
       'seq': _seq,
       'type': 'pty',
@@ -84,9 +87,16 @@ class TerminalService {
 
         terminal.write(utf8.decode(bytes, allowMalformed: true));
 
-        // Track sequence number
+        // Track sequence number and measure round-trip
         final seq = json['seq'] as int?;
-        if (seq != null) _seq = seq;
+        if (seq != null) {
+          final sendTime = _pendingTimestamps.remove(seq - 1); // echo comes as seq+1
+          if (sendTime != null) {
+            final rtt = DateTime.now().millisecondsSinceEpoch - sendTime;
+            print('[KTTY-RTT] ${rtt}ms (seq $seq)');
+          }
+          _seq = seq;
+        }
       } else if (type == 'sync_warn') {
         final payload = json['payload'] as String;
         List<int> bytes;

@@ -7,14 +7,20 @@ import '../models/viewport_mode.dart';
 import '../state/session_state.dart';
 import '../state/viewport_state.dart';
 import '../services/terminal/terminal_service.dart';
+import '../services/websocket/websocket_service.dart';
 import '../widgets/terminal/terminal_container.dart';
 import '../widgets/terminal/connection_indicator.dart';
 import '../widgets/keyboard/custom_keyboard.dart';
 
 class TerminalScreen extends StatefulWidget {
   final TerminalService terminalService;
+  final WebSocketService wsService;
 
-  const TerminalScreen({super.key, required this.terminalService});
+  const TerminalScreen({
+    super.key,
+    required this.terminalService,
+    required this.wsService,
+  });
 
   @override
   State<TerminalScreen> createState() => _TerminalScreenState();
@@ -29,6 +35,16 @@ class _TerminalScreenState extends State<TerminalScreen> {
 
   void _onKeyPressed(String value) {
     widget.terminalService.terminal.textInput(value);
+  }
+
+  void _disconnect() {
+    // Only close the connection — do NOT kill the remote shell
+    widget.terminalService.detach();
+    widget.wsService.disconnect();
+    context.read<SessionState>().setStatus(ConnectionStatus.disconnected);
+
+    // Navigate back to dashboard
+    Navigator.pushReplacementNamed(context, '/dashboard');
   }
 
   void _toggleViewport() {
@@ -83,6 +99,15 @@ class _TerminalScreenState extends State<TerminalScreen> {
           toolbarHeight: 36,
           titleTextStyle: const TextStyle(fontSize: 14),
           actions: [
+            // Disconnect button
+            IconButton(
+              icon: const Icon(Icons.exit_to_app, size: 18),
+              onPressed: _disconnect,
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(),
+              tooltip: 'Disconnect',
+            ),
+            const SizedBox(width: 8),
             IconButton(
               icon: Icon(
                 isPortrait

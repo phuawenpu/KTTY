@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
@@ -34,6 +35,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
   final _pinFocusNode = FocusNode();
   TextEditingController? _activeController;
 
+  String _pingStatus = '';
+
   @override
   void initState() {
     super.initState();
@@ -44,6 +47,39 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
     // Default focus to URL field
     _activeController = _urlController;
+
+    // Auto-ping relay on startup
+    _pingRelay();
+  }
+
+  Future<void> _pingRelay() async {
+    final url = _urlController.text.trim();
+    if (url.isEmpty) return;
+
+    setState(() => _pingStatus = 'Pinging relay...');
+    print('[KTTY] Ping: attempting connection to $url');
+
+    try {
+      // Convert wss:// to https:// for a simple HTTP check
+      final httpUrl = url
+          .replaceFirst('wss://', 'https://')
+          .replaceFirst('ws://', 'http://')
+          .replaceFirst('/ws', '/');
+
+      final uri = Uri.parse(httpUrl);
+      final client = HttpClient();
+      client.connectionTimeout = const Duration(seconds: 5);
+      final request = await client.getUrl(uri);
+      final response = await request.close().timeout(const Duration(seconds: 5));
+      await response.drain();
+
+      print('[KTTY] Ping: HTTP ${response.statusCode} from $httpUrl');
+      setState(() => _pingStatus = 'Relay reachable (HTTP ${response.statusCode})');
+      client.close();
+    } catch (e) {
+      print('[KTTY] Ping failed: $e');
+      setState(() => _pingStatus = 'Relay unreachable: $e');
+    }
   }
 
   void _onUrlFocus() {
@@ -217,6 +253,20 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     ),
                     textAlign: TextAlign.center,
                   ),
+                  if (_pingStatus.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 8),
+                      child: Text(
+                        _pingStatus,
+                        style: TextStyle(
+                          color: _pingStatus.contains('reachable')
+                              ? Colors.green
+                              : Colors.orange,
+                          fontSize: 11,
+                        ),
+                        textAlign: TextAlign.center,
+                      ),
+                    ),
                   const SizedBox(height: 32),
                   TextField(
                     controller: _urlController,

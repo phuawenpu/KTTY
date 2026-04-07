@@ -15,7 +15,8 @@ class TerminalContainer extends StatefulWidget {
 }
 
 class _TerminalContainerState extends State<TerminalContainer> {
-  double _fontSize = _defaultFontSize;
+  double? _fontSizeOverride;
+  bool _autoSized = false;
 
   static const double _minFontSize = 6.0;
   static const double _maxFontSize = 24.0;
@@ -25,50 +26,53 @@ class _TerminalContainerState extends State<TerminalContainer> {
   static const double _charWidthRatio = 0.6;
   static const int _targetMinCols = 80;
 
+  double _autoFontSize(double availableWidth) {
+    // Calculate font size that fits _targetMinCols in the available width.
+    final ideal = availableWidth / (_targetMinCols * _charWidthRatio);
+    return ideal.clamp(_minFontSize, _maxFontSize);
+  }
+
   void _zoomIn() {
     setState(() {
-      _fontSize = (_fontSize + _fontStep).clamp(_minFontSize, _maxFontSize);
+      _fontSizeOverride = ((_fontSizeOverride ?? _defaultFontSize) + _fontStep)
+          .clamp(_minFontSize, _maxFontSize);
     });
   }
 
   void _zoomOut() {
     setState(() {
-      _fontSize = (_fontSize - _fontStep).clamp(_minFontSize, _maxFontSize);
+      _fontSizeOverride = ((_fontSizeOverride ?? _defaultFontSize) - _fontStep)
+          .clamp(_minFontSize, _maxFontSize);
     });
   }
 
   @override
   Widget build(BuildContext context) {
     final isResizing = context.watch<ViewportState>().isResizing;
-    final charWidth = _charWidthRatio * _fontSize;
-    final minWidth = charWidth * _targetMinCols;
 
     return Stack(
       children: [
-        // Terminal view — horizontally scrollable so we can keep a readable
-        // font size while still fitting 80+ columns.
+        // Terminal view — auto-sizes font to fit 80 columns on first layout.
         Container(
           color: Colors.black,
           child: LayoutBuilder(
             builder: (context, constraints) {
-              final terminalWidth = max(constraints.maxWidth, minWidth);
-              return SingleChildScrollView(
-                scrollDirection: Axis.horizontal,
-                child: SizedBox(
-                  width: terminalWidth,
-                  height: constraints.maxHeight,
-                  child: TerminalView(
-                    widget.terminal,
-                    controller: widget.controller,
-                    readOnly: false,
-                    hardwareKeyboardOnly: true,
-                    autofocus: false,
-                    autoResize: true,
-                    textStyle: TerminalStyle(
-                      fontSize: _fontSize,
-                      fontFamily: 'monospace',
-                    ),
-                  ),
+              // Auto-size font on first layout to fit 80 cols.
+              if (!_autoSized && _fontSizeOverride == null) {
+                _autoSized = true;
+                _fontSizeOverride = _autoFontSize(constraints.maxWidth);
+              }
+              final fontSize = _fontSizeOverride ?? _defaultFontSize;
+              return TerminalView(
+                widget.terminal,
+                controller: widget.controller,
+                readOnly: false,
+                hardwareKeyboardOnly: true,
+                autofocus: false,
+                autoResize: true,
+                textStyle: TerminalStyle(
+                  fontSize: fontSize,
+                  fontFamily: 'monospace',
                 ),
               );
             },
@@ -85,7 +89,7 @@ class _TerminalContainerState extends State<TerminalContainer> {
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 4),
                 child: Text(
-                  '${_fontSize.round()}',
+                  '${(_fontSizeOverride ?? _defaultFontSize).round()}',
                   style: const TextStyle(
                     color: Colors.white38,
                     fontSize: 10,

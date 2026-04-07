@@ -17,8 +17,8 @@ class KeyButton extends StatelessWidget {
 
   String get _displayLabel {
     final label = keyDef.label;
-    if (isUpperCase && label.length == 1) {
-      return label.toUpperCase();
+    if (label.length == 1) {
+      return isUpperCase ? label.toUpperCase() : label.toLowerCase();
     }
     return label;
   }

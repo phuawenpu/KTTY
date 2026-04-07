@@ -335,7 +335,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                         : const Text(
                             'Connect',
                             style:
-                                TextStyle(fontSize: 16, color: Colors.white),
+                                TextStyle(fontSize: 19, color: Colors.white),
                           ),
                   ),
                 ],

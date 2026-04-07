@@ -68,11 +68,11 @@ class TerminalService {
       // Skip handshake messages
       if (type == 'handshake') return;
 
-      // Agent restarted — clear terminal for fresh session
+      // Agent restarted — clear terminal and show message
       if (type == 'boot' || json['action'] == 'join') {
         print('[KTTY] Agent restarted, clearing terminal');
-        terminal.write('\x1b[2J\x1b[H'); // clear screen
-        terminal.write('\r\n*** New session ***\r\n');
+        terminal.write('\x1b[2J\x1b[H');
+        terminal.write('\r\n*** Session ended. Use exit button to reconnect. ***\r\n');
         return;
       }
 

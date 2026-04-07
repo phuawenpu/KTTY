@@ -14,7 +14,7 @@ class TerminalContainer extends StatefulWidget {
 }
 
 class _TerminalContainerState extends State<TerminalContainer> {
-  double _fontSize = 12.0;
+  double _fontSize = 14.0;
 
   static const double _minFontSize = 6.0;
   static const double _maxFontSize = 24.0;
@@ -84,7 +84,7 @@ class _TerminalContainerState extends State<TerminalContainer> {
                 'Resizing...',
                 style: TextStyle(
                   color: Colors.white70,
-                  fontSize: 18,
+                  fontSize: 22,
                 ),
               ),
             ),

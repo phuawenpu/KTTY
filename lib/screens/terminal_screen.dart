@@ -119,7 +119,7 @@ class _TerminalScreenState extends State<TerminalScreen> {
           ),
           backgroundColor: const Color(0xFF16213E),
           toolbarHeight: 36,
-          titleTextStyle: const TextStyle(fontSize: 14),
+          titleTextStyle: const TextStyle(fontSize: 17),
           actions: [
             // Disconnect button
             IconButton(

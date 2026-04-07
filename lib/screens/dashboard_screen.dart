@@ -240,7 +240,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
+    return SafeArea(
+      child: Scaffold(
       backgroundColor: const Color(0xFF1A1A2E),
       appBar: AppBar(
         title: Row(
@@ -264,21 +265,20 @@ class _DashboardScreenState extends State<DashboardScreen> {
           // Form area: 65%
           Expanded(
             flex: kPortraitTerminalFlex,
-            child: Padding(
-              padding: const EdgeInsets.all(24),
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
               child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
                   Container(
                     color: const Color(0xFF0F1923),
-                    padding: const EdgeInsets.all(16),
+                    padding: const EdgeInsets.all(8),
                     child: Image.asset(
                       'assets/ktty_logo.png',
-                      height: 240,
+                      height: 100,
                     ),
                   ),
-                  const SizedBox(height: 16),
+                  const SizedBox(height: 10),
                   TextField(
                     controller: _urlController,
                     focusNode: _urlFocusNode,
@@ -300,7 +300,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       ),
                     ),
                   ),
-                  const SizedBox(height: 16),
+                  const SizedBox(height: 10),
                   TextField(
                     controller: _pinController,
                     focusNode: _pinFocusNode,
@@ -323,7 +323,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       ),
                     ),
                   ),
-                  const SizedBox(height: 24),
+                  const SizedBox(height: 12),
                   ElevatedButton(
                     onPressed: _connecting ? null : _connect,
                     style: ElevatedButton.styleFrom(
@@ -351,6 +351,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
           ),
         ],
       ),
+    ),
     );
   }
 }

@@ -244,11 +244,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
       child: Scaffold(
       backgroundColor: const Color(0xFF101721),
       appBar: AppBar(
+        toolbarHeight: 40,
         title: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Image.asset('assets/ktty_logo.png', height: 28),
-            const SizedBox(width: 8),
+            Image.asset('assets/ktty_logo.png', height: 24),
+            const SizedBox(width: 6),
             const Text('KTTY'),
           ],
         ),
@@ -267,28 +268,33 @@ class _DashboardScreenState extends State<DashboardScreen> {
             flex: kPortraitTerminalFlex,
             child: Stack(
               children: [
-                // Logo as background, centered
-                Positioned.fill(
+                // Logo towards top
+                Positioned(
+                  top: 8,
+                  left: 0,
+                  right: 0,
                   child: Container(
                     color: const Color(0xFF101721),
-                    child: Center(
-                      child: Opacity(
-                        opacity: 0.3,
-                        child: Image.asset(
-                          'assets/ktty_logo.png',
-                          height: 240,
-                        ),
+                    child: Opacity(
+                      opacity: 0.3,
+                      child: Image.asset(
+                        'assets/ktty_logo.png',
+                        height: 240,
                       ),
                     ),
                   ),
                 ),
-                // Form content overlaid
-                SingleChildScrollView(
-                  padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                  const SizedBox(height: 10),
+                // Form content at the bottom
+                Positioned(
+                  left: 0,
+                  right: 0,
+                  bottom: 0,
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
                   TextField(
                     controller: _urlController,
                     focusNode: _urlFocusNode,
@@ -351,6 +357,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 ],
               ),
             ),
+          ),
               ],
             ),
           ),

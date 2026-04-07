@@ -21,10 +21,10 @@ impl PtyHandle {
             pixel_height: 0,
         })?;
 
-        // Try tmux for session persistence, fall back to plain bash
+        // Start plain bash for now — tmux causes rapid redraws over relay
+        // TODO: Re-enable tmux once terminal resize handshake is working
         let mut cmd = CommandBuilder::new("bash");
-        cmd.arg("-c");
-        cmd.arg("command -v tmux >/dev/null 2>&1 && (tmux attach-session || tmux new-session) || bash");
+        cmd.env("TERM", "xterm-256color");
 
         let child = pair.slave.spawn_command(cmd)?;
 

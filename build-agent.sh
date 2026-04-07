@@ -1,17 +1,26 @@
 #!/bin/bash
-# Build the KTTY agent and copy to parent directory.
+# Copy the pre-built KTTY agent release binary to the parent directory.
 # Run from the workspace directory: ./build-agent.sh
+#
+# The release binary is pre-compiled inside the container.
+# No Rust compiler needed on the host.
 
 set -e
 
-cd "$(dirname "$0")/backend"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SRC="$SCRIPT_DIR/backend/target/release/ktty-agent"
+DEST="$SCRIPT_DIR/../ktty-agent"
 
-echo "Building ktty-agent (debug)..."
-cargo build -p ktty-agent
+if [ ! -f "$SRC" ]; then
+    echo "Error: Release binary not found at $SRC"
+    echo "Build it inside the container first: cd backend && cargo build --release -p ktty-agent"
+    exit 1
+fi
 
-echo "Copying to parent directory..."
-cp target/debug/ktty-agent ..
+cp "$SRC" "$DEST"
+chmod +x "$DEST"
 
-echo "Done: ../ktty-agent"
+echo "Copied to: $DEST"
+ls -lh "$DEST"
 echo ""
-echo "Usage: ./ktty-agent --relay-url wss://ktty-relay.fly.dev"
+echo "Usage: $DEST --relay-url wss://ktty-relay.fly.dev"

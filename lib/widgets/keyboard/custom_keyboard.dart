@@ -112,7 +112,7 @@ class CustomKeyboard extends StatelessWidget {
                     style: TextStyle(
                       color:
                           isActive ? Colors.blueAccent : Colors.white38,
-                      fontSize: 10,
+                      fontSize: 12,
                       fontWeight: FontWeight.w600,
                     ),
                   ),

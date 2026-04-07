@@ -70,7 +70,7 @@ class KeyButton extends StatelessWidget {
                   _displayLabel,
                   style: TextStyle(
                     color: Colors.white,
-                    fontSize: keyDef.label.length > 2 ? 10 : 14,
+                    fontSize: keyDef.label.length > 2 ? 12 : 16,
                     fontWeight: FontWeight.w500,
                   ),
                 ),

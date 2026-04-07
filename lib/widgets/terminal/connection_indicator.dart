@@ -8,14 +8,21 @@ class ConnectionIndicator extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final status = context.watch<SessionState>().status;
+    final session = context.watch<SessionState>();
+    final status = session.status;
+    final relayReachable = session.relayReachable;
     final Color color;
     final String label;
 
     switch (status) {
       case ConnectionStatus.disconnected:
-        color = Colors.red;
-        label = 'Disconnected';
+        if (relayReachable) {
+          color = const Color(0xFF4488FF);
+          label = 'Relay OK';
+        } else {
+          color = Colors.red;
+          label = 'Disconnected';
+        }
       case ConnectionStatus.connectingRelay:
         color = Colors.orange;
         label = 'Relay...';

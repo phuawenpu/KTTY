@@ -35,7 +35,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   final _pinFocusNode = FocusNode();
   TextEditingController? _activeController;
 
-  String _pingStatus = '';
+  bool _relayReachable = false;
 
   @override
   void initState() {
@@ -56,11 +56,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
     final url = _urlController.text.trim();
     if (url.isEmpty) return;
 
-    setState(() => _pingStatus = 'Pinging relay...');
     print('[KTTY] Ping: attempting connection to $url');
 
     try {
-      // Convert wss:// to https:// for a simple HTTP check
       final httpUrl = url
           .replaceFirst('wss://', 'https://')
           .replaceFirst('ws://', 'http://')
@@ -75,11 +73,13 @@ class _DashboardScreenState extends State<DashboardScreen> {
       await response.drain();
 
       print('[KTTY] Ping: HTTP ${response.statusCode} from $httpUrl');
-      setState(() => _pingStatus = 'Relay reachable (HTTP ${response.statusCode})');
+      setState(() => _relayReachable = true);
+      if (mounted) context.read<SessionState>().setRelayReachable(true);
       client.close();
     } catch (e) {
       print('[KTTY] Ping failed: $e');
-      setState(() => _pingStatus = 'Relay unreachable: $e');
+      setState(() => _relayReachable = false);
+      if (mounted) context.read<SessionState>().setRelayReachable(false);
     }
   }
 
@@ -254,20 +254,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     ),
                     textAlign: TextAlign.center,
                   ),
-                  if (_pingStatus.isNotEmpty)
-                    Padding(
-                      padding: const EdgeInsets.only(top: 8),
-                      child: Text(
-                        _pingStatus,
-                        style: TextStyle(
-                          color: _pingStatus.contains('reachable')
-                              ? Colors.green
-                              : Colors.orange,
-                          fontSize: 11,
-                        ),
-                        textAlign: TextAlign.center,
-                      ),
-                    ),
                   const SizedBox(height: 32),
                   TextField(
                     controller: _urlController,

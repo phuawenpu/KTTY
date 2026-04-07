@@ -87,24 +87,31 @@ async fn handle_socket(socket: WebSocket, rooms: RoomMap) {
     };
 
     if room_id.is_empty() {
+        eprintln!("[relay] Empty room_id, dropping connection");
         return;
     }
+
+    eprintln!("[relay] Client joined room: {}...{}", &room_id[..8], &room_id[room_id.len()-8..]);
 
     // Create channel for this peer
     let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
 
     // Register in room and get our peer ID
     let peer_id;
+    let peer_count;
     {
         let mut map = rooms.lock().await;
         let room = map.entry(room_id.clone()).or_insert_with(Room::new);
 
         if room.peers.len() >= 2 {
+            eprintln!("[relay] Room full, dropping connection");
             return; // Room full
         }
 
         peer_id = room.add_peer(tx);
+        peer_count = room.peers.len();
     }
+    eprintln!("[relay] Peer {} joined (now {} in room)", peer_id, peer_count);
 
     // Task: forward from channel to WebSocket sink
     let write_task = tokio::spawn(async move {
@@ -121,13 +128,18 @@ async fn handle_socket(socket: WebSocket, rooms: RoomMap) {
 
     while let Some(Ok(msg)) = ws_rx.next().await {
         match &msg {
-            Message::Close(_) => break,
+            Message::Close(_) => {
+                eprintln!("[relay] Peer {} sent close", peer_id);
+                break;
+            }
             Message::Ping(_) | Message::Pong(_) => continue,
             _ => {}
         }
 
         let map = rooms_read.lock().await;
         if let Some(room) = map.get(&room_id_read) {
+            let targets = room.peers.iter().filter(|p| p.id != peer_id).count();
+            eprintln!("[relay] Peer {} -> forwarding to {} peer(s)", peer_id, targets);
             for peer in &room.peers {
                 if peer.id != peer_id {
                     let _ = peer.tx.send(msg.clone());

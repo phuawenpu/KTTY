@@ -6,7 +6,9 @@ edition = "2024"
 [dependencies]
 ktty-common = { path = "../common" }
 tokio = { version = "1", features = ["full"] }
-tokio-tungstenite = "0.26"
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-native-roots"] }
+rustls = { version = "0.23", features = ["ring"] }
+ring = "0.17"
 portable-pty = "0.9"
 clap = { version = "4", features = ["derive", "env"] }
 serde_json = "1.0"

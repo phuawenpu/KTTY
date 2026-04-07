@@ -6,11 +6,18 @@ class SessionState extends ChangeNotifier {
   String _pin = '';
   ConnectionStatus _status = ConnectionStatus.disconnected;
   int _lastSeq = 0;
+  bool _relayReachable = false;
 
   String get url => _url;
   String get pin => _pin;
   ConnectionStatus get status => _status;
   int get lastSeq => _lastSeq;
+  bool get relayReachable => _relayReachable;
+
+  void setRelayReachable(bool reachable) {
+    _relayReachable = reachable;
+    notifyListeners();
+  }
 
   void setUrl(String url) {
     _url = url;

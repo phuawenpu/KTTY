@@ -25,7 +25,7 @@ class DashboardScreen extends StatefulWidget {
 }
 
 class _DashboardScreenState extends State<DashboardScreen> {
-  final _urlController = TextEditingController(text: 'ws://localhost:8080');
+  final _urlController = TextEditingController(text: 'wss://ktty-relay.fly.dev/ws');
   final _pinController = TextEditingController();
   bool _connecting = false;
 

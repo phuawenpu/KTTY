@@ -45,13 +45,51 @@ impl Session {
         // 1. Send join
         let join = JoinMessage::new(self.room_id.clone());
         ws_tx.send(text_msg(serde_json::to_string(&join)?)).await?;
+        eprintln!("[agent] Joined room, waiting for Flutter client...");
 
-        // 2. Send boot signal (unencrypted)
+        // 2. Wait for the Flutter client's join message to be forwarded to us.
+        //    Send periodic pings to keep the connection alive.
+        eprintln!("[agent] Waiting for Flutter client (sending keepalive pings)...");
+        loop {
+            let timeout = tokio::time::sleep(std::time::Duration::from_secs(5));
+            tokio::pin!(timeout);
+
+            tokio::select! {
+                msg = ws_rx.next() => {
+                    match msg {
+                        Some(Ok(Message::Text(ref text))) => {
+                            let text_str = text.to_string();
+                            eprintln!("[agent] Received: {}", &text_str[..text_str.len().min(80)]);
+                            break;
+                        }
+                        Some(Ok(Message::Pong(_))) => continue,
+                        Some(Ok(Message::Ping(d))) => {
+                            let _ = ws_tx.send(Message::Pong(d)).await;
+                            continue;
+                        }
+                        Some(Ok(_)) => continue,
+                        None | Some(Err(_)) => {
+                            return Err(anyhow::anyhow!("WebSocket closed while waiting for client"));
+                        }
+                    }
+                }
+                _ = &mut timeout => {
+                    // Send ping to keep connection alive
+                    let _ = ws_tx.send(Message::Ping(vec![].into())).await;
+                    eprintln!("[agent] Sent keepalive ping");
+                }
+            }
+        }
+        eprintln!("[agent] Flutter client detected in room");
+
+        // 3. Send boot signal (unencrypted)
         let boot = BootSignal::new();
         ws_tx.send(text_msg(serde_json::to_string(&boot)?)).await?;
 
-        // 3. ML-KEM-768 handshake
+        // 4. ML-KEM-768 handshake
+        eprintln!("[agent] Starting ML-KEM handshake...");
         let shared_secret = self.perform_handshake(&mut ws_tx, &mut ws_rx).await?;
+        eprintln!("[agent] Handshake complete!");
         let shared_key: [u8; 32] = shared_secret;
 
         // Shared state

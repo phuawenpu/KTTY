@@ -51,19 +51,23 @@ class WebSocketService {
 
     _subscription = _channel!.stream.listen(
       (data) {
+        print('[KTTY-WS] Received: ${(data as String).substring(0, (data as String).length.clamp(0, 100))}');
         _messageController.add(data as String);
       },
       onError: (error) {
+        print('[KTTY-WS] Stream error: $error');
         _messageController.addError(error);
         _handleDisconnect();
       },
       onDone: () {
+        print('[KTTY-WS] Stream closed');
         _handleDisconnect();
       },
     );
   }
 
   void _handleDisconnect() {
+    print('[KTTY-WS] Disconnected');
     _channel = null;
     onConnectionChanged?.call(false);
     _scheduleReconnect();
@@ -81,14 +85,16 @@ class WebSocketService {
     );
     _reconnectAttempts++;
 
+    print('[KTTY-WS] Scheduling reconnect in ${delay.inSeconds}s (attempt $_reconnectAttempts)');
     _reconnectTimer = Timer(delay, () async {
       try {
+        print('[KTTY-WS] Reconnecting...');
         await connect(_lastUrl!);
         await performHandshake(_lastPin!);
         _reconnectAttempts = 0;
         onConnectionChanged?.call(true);
-      } catch (_) {
-        // Will retry via _handleDisconnect -> _scheduleReconnect
+      } catch (e) {
+        print('[KTTY-WS] Reconnect failed: $e');
       }
     });
   }
@@ -104,6 +110,7 @@ class WebSocketService {
     final roomId = await PinUtils.hashPin(pin);
 
     // 1. Send join
+    print('[KTTY-WS] Sending join with room_id: ${roomId.substring(0, 8)}...');
     sendJson({'action': 'join', 'room_id': roomId});
 
     // 2. Wait for handshake message with ML-KEM public key
@@ -123,8 +130,7 @@ class WebSocketService {
     // 3. Encapsulate shared secret
     final result = HandshakeService.encapsulate(pubKey);
 
-    // Debug: log shared secret
-    print('Flutter shared secret (hex): ${result.sharedSecret.map((b) => b.toRadixString(16).padLeft(2, '0')).join()}');
+    print('[KTTY-WS] ML-KEM encapsulated. Shared secret: ${result.sharedSecret.sublist(0, 4).map((b) => b.toRadixString(16).padLeft(2, '0')).join()}...');
 
     // 4. Send ciphertext back
     sendJson({

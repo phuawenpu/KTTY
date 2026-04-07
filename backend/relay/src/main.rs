@@ -103,9 +103,12 @@ async fn handle_socket(socket: WebSocket, rooms: RoomMap) {
         let mut map = rooms.lock().await;
         let room = map.entry(room_id.clone()).or_insert_with(Room::new);
 
+        // Clean up stale peers (closed channels) before checking capacity
+        room.peers.retain(|p| !p.tx.is_closed());
+
         if room.peers.len() >= 2 {
-            eprintln!("[relay] Room full, dropping connection");
-            return; // Room full
+            eprintln!("[relay] Room full ({} peers), dropping connection", room.peers.len());
+            return;
         }
 
         peer_id = room.add_peer(tx);
@@ -113,11 +116,42 @@ async fn handle_socket(socket: WebSocket, rooms: RoomMap) {
     }
     eprintln!("[relay] Peer {} joined (now {} in room)", peer_id, peer_count);
 
-    // Task: forward from channel to WebSocket sink
+    // Notify existing peers that a new client joined by forwarding the join message
+    {
+        let join_msg = serde_json::json!({"action": "join", "room_id": room_id});
+        let join_text = Message::Text(serde_json::to_string(&join_msg).unwrap().into());
+        let map = rooms.lock().await;
+        if let Some(room) = map.get(&room_id) {
+            for peer in &room.peers {
+                if peer.id != peer_id {
+                    let _ = peer.tx.send(join_text.clone());
+                    eprintln!("[relay] Notified peer {} of new join", peer.id);
+                }
+            }
+        }
+    }
+
+    // Task: forward from channel to WebSocket sink + send periodic pings
     let write_task = tokio::spawn(async move {
-        while let Some(msg) = rx.recv().await {
-            if ws_tx.send(msg).await.is_err() {
-                break;
+        let mut ping_interval = tokio::time::interval(std::time::Duration::from_secs(15));
+        ping_interval.tick().await; // skip immediate tick
+        loop {
+            tokio::select! {
+                msg = rx.recv() => {
+                    match msg {
+                        Some(m) => {
+                            if ws_tx.send(m).await.is_err() {
+                                break;
+                            }
+                        }
+                        None => break,
+                    }
+                }
+                _ = ping_interval.tick() => {
+                    if ws_tx.send(Message::Ping(vec![].into())).await.is_err() {
+                        break;
+                    }
+                }
             }
         }
     });

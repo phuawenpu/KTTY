@@ -26,7 +26,7 @@ class DashboardScreen extends StatefulWidget {
 }
 
 class _DashboardScreenState extends State<DashboardScreen> {
-  final _urlController = TextEditingController(text: 'wss://ktty-relay.fly.dev/ws');
+  final _urlController = TextEditingController(text: 'wss://137.66.0.57/ws');
   final _pinController = TextEditingController();
   bool _connecting = false;
 
@@ -69,6 +69,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       final uri = Uri.parse(httpUrl);
       final client = HttpClient();
       client.connectionTimeout = const Duration(seconds: 5);
+      client.badCertificateCallback = (cert, host, port) => true;
       final request = await client.getUrl(uri);
       final response = await request.close().timeout(const Duration(seconds: 5));
       await response.drain();

@@ -242,7 +242,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   Widget build(BuildContext context) {
     return SafeArea(
       child: Scaffold(
-      backgroundColor: const Color(0xFF1A1A2E),
+      backgroundColor: const Color(0xFF101721),
       appBar: AppBar(
         title: Row(
           mainAxisSize: MainAxisSize.min,
@@ -265,19 +265,29 @@ class _DashboardScreenState extends State<DashboardScreen> {
           // Form area: 65%
           Expanded(
             flex: kPortraitTerminalFlex,
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Container(
-                    color: const Color(0xFF0F1923),
-                    padding: const EdgeInsets.all(8),
-                    child: Image.asset(
-                      'assets/ktty_logo.png',
-                      height: 100,
+            child: Stack(
+              children: [
+                // Logo as background, centered
+                Positioned.fill(
+                  child: Container(
+                    color: const Color(0xFF101721),
+                    child: Center(
+                      child: Opacity(
+                        opacity: 0.3,
+                        child: Image.asset(
+                          'assets/ktty_logo.png',
+                          height: 240,
+                        ),
+                      ),
                     ),
                   ),
+                ),
+                // Form content overlaid
+                SingleChildScrollView(
+                  padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
                   const SizedBox(height: 10),
                   TextField(
                     controller: _urlController,
@@ -340,6 +350,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   ),
                 ],
               ),
+            ),
+              ],
             ),
           ),
           // Keyboard: 35%

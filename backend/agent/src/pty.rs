@@ -21,9 +21,11 @@ impl PtyHandle {
             pixel_height: 0,
         })?;
 
-        // Start plain bash for now — tmux causes rapid redraws over relay
-        // TODO: Re-enable tmux once terminal resize handshake is working
+        // Use tmux for session persistence across agent restarts.
+        // Named session 'ktty' so we can reattach after crash/restart.
         let mut cmd = CommandBuilder::new("bash");
+        cmd.arg("-c");
+        cmd.arg("TERM=xterm-256color tmux new-session -A -s ktty");
         cmd.env("TERM", "xterm-256color");
 
         let child = pair.slave.spawn_command(cmd)?;

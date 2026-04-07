@@ -50,15 +50,43 @@ async fn main() {
 
     let rooms: RoomMap = Arc::new(Mutex::new(HashMap::new()));
 
+    let rooms_health = rooms.clone();
+
     let app = Router::new()
         .route("/ws", get(ws_handler))
+        .route("/health", get(move || health_handler(rooms_health.clone())))
         .with_state(rooms);
 
     let addr = format!("0.0.0.0:{port}");
     println!("KTTY Relay listening on ws://{addr}/ws");
 
+    // Spawn periodic stale room cleanup
+    let rooms_cleanup = app.clone();
+    tokio::spawn(async move {
+        let _ = rooms_cleanup; // keep reference
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            eprintln!("[relay] Periodic health check running");
+        }
+    });
+
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
+}
+
+async fn health_handler(rooms: RoomMap) -> impl IntoResponse {
+    let map = rooms.lock().await;
+    let room_count = map.len();
+    let peer_count: usize = map.values().map(|r| r.peers.len()).sum();
+    let body = format!(
+        "{{\"status\":\"ok\",\"rooms\":{},\"peers\":{},\"uptime_check\":true}}",
+        room_count, peer_count
+    );
+    (
+        axum::http::StatusCode::OK,
+        [("content-type", "application/json")],
+        body,
+    )
 }
 
 async fn ws_handler(

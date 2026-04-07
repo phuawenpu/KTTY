@@ -127,7 +127,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
     session.setStatus(ConnectionStatus.syncing);
 
     try {
+      print('[KTTY] Connect tapped. URL=$url PIN length=${pin.length}');
+
       widget.wsService.onConnectionChanged = (connected) {
+        print('[KTTY] Connection state changed: $connected');
         if (connected) {
           session.setStatus(ConnectionStatus.connected);
         } else {
@@ -135,8 +138,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
         }
       };
 
+      print('[KTTY] Connecting to WebSocket...');
       await widget.wsService.connect(url);
+      print('[KTTY] WebSocket connected. Starting handshake...');
       await widget.wsService.performHandshake(pin);
+      print('[KTTY] Handshake complete.');
 
       widget.terminalService.attach();
       session.setStatus(ConnectionStatus.connected);
@@ -144,7 +150,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
       if (mounted) {
         Navigator.pushReplacementNamed(context, '/terminal');
       }
-    } catch (e) {
+    } catch (e, st) {
+      print('[KTTY] Connection failed: $e');
+      print('[KTTY] Stack: ${st.toString().split('\n').take(5).join('\n')}');
       session.setStatus(ConnectionStatus.disconnected);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(

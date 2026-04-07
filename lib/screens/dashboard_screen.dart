@@ -124,7 +124,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
     setState(() => _connecting = true);
     session.setUrl(url);
     session.setPin(pin);
-    session.setStatus(ConnectionStatus.syncing);
+    session.setStatus(ConnectionStatus.connectingRelay);
 
     try {
       print('[KTTY] Connect tapped. URL=$url PIN length=${pin.length}');
@@ -138,9 +138,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
         }
       };
 
-      print('[KTTY] Connecting to WebSocket...');
+      print('[KTTY] Connecting to relay...');
       await widget.wsService.connect(url);
-      print('[KTTY] WebSocket connected. Starting handshake...');
+      session.setStatus(ConnectionStatus.relayConnected);
+      print('[KTTY] Relay connected. Starting handshake...');
+
+      session.setStatus(ConnectionStatus.handshaking);
       await widget.wsService.performHandshake(pin);
       print('[KTTY] Handshake complete.');
 
@@ -178,7 +181,14 @@ class _DashboardScreenState extends State<DashboardScreen> {
     return Scaffold(
       backgroundColor: const Color(0xFF1A1A2E),
       appBar: AppBar(
-        title: const Text('KTTY'),
+        title: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Image.asset('assets/ktty_logo.png', height: 28),
+            const SizedBox(width: 8),
+            const Text('KTTY'),
+          ],
+        ),
         backgroundColor: const Color(0xFF16213E),
         actions: const [
           Padding(

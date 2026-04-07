@@ -13,32 +13,44 @@ class ConnectionIndicator extends StatelessWidget {
     final String label;
 
     switch (status) {
-      case ConnectionStatus.connected:
-        color = Colors.green;
-        label = 'Connected';
-      case ConnectionStatus.syncing:
-        color = Colors.yellow;
-        label = 'Syncing';
       case ConnectionStatus.disconnected:
         color = Colors.red;
         label = 'Disconnected';
+      case ConnectionStatus.connectingRelay:
+        color = Colors.orange;
+        label = 'Relay...';
+      case ConnectionStatus.relayConnected:
+        color = Colors.orange;
+        label = 'Relay OK';
+      case ConnectionStatus.handshaking:
+        color = Colors.yellow;
+        label = 'Handshake...';
+      case ConnectionStatus.waitingForAgent:
+        color = Colors.yellow;
+        label = 'Waiting Agent';
+      case ConnectionStatus.syncing:
+        color = Colors.yellow;
+        label = 'Syncing';
+      case ConnectionStatus.connected:
+        color = Colors.green;
+        label = 'Connected';
     }
 
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
         Container(
-          width: 10,
-          height: 10,
+          width: 8,
+          height: 8,
           decoration: BoxDecoration(
             color: color,
             shape: BoxShape.circle,
           ),
         ),
-        const SizedBox(width: 6),
+        const SizedBox(width: 4),
         Text(
           label,
-          style: TextStyle(color: color, fontSize: 12),
+          style: TextStyle(color: color, fontSize: 11),
         ),
       ],
     );

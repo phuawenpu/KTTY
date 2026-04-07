@@ -65,13 +65,20 @@ class _TerminalScreenState extends State<TerminalScreen> {
     final status = context.watch<SessionState>().status;
     final vs = context.watch<ViewportState>();
     final isPortrait = vs.mode == ViewportMode.portrait;
-    final keyboardDisabled = status != ConnectionStatus.connected;
+    final keyboardDisabled = status != ConnectionStatus.connected && status != ConnectionStatus.syncing;
 
     return SafeArea(
       child: Scaffold(
         backgroundColor: Colors.black,
         appBar: AppBar(
-          title: const Text('KTTY Terminal'),
+          title: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Image.asset('assets/ktty_logo.png', height: 22),
+              const SizedBox(width: 6),
+              const Text('KTTY'),
+            ],
+          ),
           backgroundColor: const Color(0xFF16213E),
           toolbarHeight: 36,
           titleTextStyle: const TextStyle(fontSize: 14),

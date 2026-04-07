@@ -93,7 +93,7 @@ class ControlCluster extends StatelessWidget {
             ),
           ),
           child: Center(
-            child: Icon(icon, color: Colors.white70, size: 14),
+            child: Icon(icon, color: Colors.white70, size: 15),
           ),
         ),
       ),
@@ -103,7 +103,7 @@ class ControlCluster extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return SizedBox(
-      height: 36,
+      height: 38,
       child: Row(
         children: [
           _buildKey('Esc', '\x1b'),

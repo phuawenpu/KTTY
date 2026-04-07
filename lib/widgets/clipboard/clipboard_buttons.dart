@@ -60,8 +60,8 @@ class ClipboardButtons extends StatelessWidget {
           onTap: onTap,
           borderRadius: BorderRadius.circular(4),
           child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-            child: Icon(icon, color: Colors.white54, size: 16),
+            padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+            child: Icon(icon, color: Colors.white54, size: 18),
           ),
         ),
       ),

@@ -86,7 +86,7 @@ class CustomKeyboard extends StatelessWidget {
 
   Widget _buildToolbar(BuildContext context, int activeLayer) {
     return SizedBox(
-      height: 32,
+      height: 34,
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 4),
         child: Row(
@@ -164,7 +164,7 @@ class CustomKeyboard extends StatelessWidget {
           borderRadius: BorderRadius.circular(4),
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-            child: Icon(icon, color: Colors.white70, size: 18),
+            child: Icon(icon, color: Colors.white70, size: 20),
           ),
         ),
       ),

@@ -44,7 +44,8 @@ class _TerminalContainerState extends State<TerminalContainer> {
           child: TerminalView(
             widget.terminal,
             controller: widget.controller,
-            readOnly: true,
+            readOnly: false,
+            hardwareKeyboardOnly: true,
             autofocus: false,
             autoResize: true,
             textStyle: TerminalStyle(

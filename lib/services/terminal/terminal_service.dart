@@ -65,9 +65,16 @@ class TerminalService {
       final json = jsonDecode(raw) as Map<String, dynamic>;
       final type = json['type'] as String?;
 
-      // Skip handshake and control messages
-      if (type == 'handshake' || type == 'boot') return;
-      if (json['action'] == 'join') return;
+      // Skip handshake messages
+      if (type == 'handshake') return;
+
+      // Agent restarted — clear terminal for fresh session
+      if (type == 'boot' || json['action'] == 'join') {
+        print('[KTTY] Agent restarted, clearing terminal');
+        terminal.write('\x1b[2J\x1b[H'); // clear screen
+        terminal.write('\r\n*** New session ***\r\n');
+        return;
+      }
 
       if (type == 'pty') {
         final payload = json['payload'] as String;

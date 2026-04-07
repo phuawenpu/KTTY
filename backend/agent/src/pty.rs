@@ -21,11 +21,11 @@ impl PtyHandle {
             pixel_height: 0,
         })?;
 
-        // Use tmux for session persistence across agent restarts.
-        // Named session 'ktty' so we can reattach after crash/restart.
+        // Plain bash for stable PTY. Tmux causes session lifecycle issues
+        // when running as a background agent process.
+        // TODO: Re-enable tmux when agent runs as a proper systemd service
         let mut cmd = CommandBuilder::new("bash");
-        cmd.arg("-c");
-        cmd.arg("TERM=xterm-256color tmux new-session -A -s ktty");
+        cmd.arg("--login");
         cmd.env("TERM", "xterm-256color");
 
         let child = pair.slave.spawn_command(cmd)?;

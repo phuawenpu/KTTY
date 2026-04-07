@@ -70,7 +70,8 @@ class WebSocketService {
     print('[KTTY-WS] Disconnected');
     _channel = null;
     onConnectionChanged?.call(false);
-    _scheduleReconnect();
+    // Don't auto-reconnect — let the user manually reconnect from dashboard
+    // Auto-reconnect causes overlapping connections and session chaos
   }
 
   void _scheduleReconnect() {

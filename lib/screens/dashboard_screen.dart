@@ -270,9 +270,13 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 mainAxisAlignment: MainAxisAlignment.center,
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  Image.asset(
-                    'assets/ktty_logo.png',
-                    height: 240,
+                  Container(
+                    color: const Color(0xFF0F1923),
+                    padding: const EdgeInsets.all(16),
+                    child: Image.asset(
+                      'assets/ktty_logo.png',
+                      height: 240,
+                    ),
                   ),
                   const SizedBox(height: 16),
                   TextField(

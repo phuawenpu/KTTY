@@ -22,8 +22,13 @@ struct Cli {
     rows: u16,
 }
 
+const VERSION: u32 = 7;
+const BUILD_TIME: &str = env!("KTTY_BUILD_TIME");
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    eprintln!("ktty-agent v{VERSION} (built {BUILD_TIME})");
+
     rustls::crypto::ring::default_provider()
         .install_default()
         .expect("Failed to install rustls crypto provider");

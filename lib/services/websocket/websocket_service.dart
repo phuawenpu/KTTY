@@ -87,12 +87,14 @@ class WebSocketService {
   }
 
   void _handleDisconnect() {
-    print('[KTTY-WS] Disconnected');
+    print('[KTTY-WS] Disconnected (autoReconnect=$_autoReconnectEnabled, hasUrl=${_lastUrl != null}, hasPin=${_lastPin != null})');
     _channel = null;
     _relayAuthToken = null;
     onConnectionChanged?.call(false);
     if (_autoReconnectEnabled) {
       _scheduleReconnect();
+    } else {
+      print('[KTTY-WS] Auto-reconnect disabled, not reconnecting');
     }
   }
 
@@ -102,6 +104,15 @@ class WebSocketService {
     _autoReconnectEnabled = true;
     _reconnectAttempts = 0;
     _scheduleReconnect();
+  }
+
+  /// Suppress auto-reconnect while app is in background.
+  /// Android kills the WS immediately; reconnecting in background fails
+  /// (DNS/network suspended). The app will reconnect on resume instead.
+  void suppressReconnect() {
+    _autoReconnectEnabled = false;
+    _cancelReconnect();
+    print('[KTTY-WS] Reconnect suppressed (backgrounded)');
   }
 
   /// Close the WS channel without clearing credentials.

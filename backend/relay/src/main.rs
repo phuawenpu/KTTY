@@ -169,9 +169,18 @@ async fn handle_socket(socket: WebSocket, rooms: RoomMap) {
         room.peers.retain(|p| p.tx.send(Message::Ping(vec![].into())).is_ok());
 
         if room.peers.len() >= 2 {
-            // Evict the oldest peer to make room
-            eprintln!("[relay] Room full, evicting oldest peer");
-            room.peers.remove(0);
+            // Evict the least recently active peer (likely a stale connection)
+            if let Some(idx) = room.peers.iter().enumerate()
+                .min_by_key(|(_, p)| p.last_activity)
+                .map(|(i, _)| i)
+            {
+                let evicted = &room.peers[idx];
+                // Notify the evicted peer so it knows to reconnect
+                let msg = serde_json::json!({"type": "peer_disconnect", "peer_id": evicted.id});
+                let _ = evicted.tx.send(Message::Text(serde_json::to_string(&msg).unwrap().into()));
+                eprintln!("[relay] Room full, evicting least active peer {}", evicted.id);
+                room.peers.remove(idx);
+            }
         }
 
         let (id, token) = room.add_peer(tx);
@@ -203,7 +212,8 @@ async fn handle_socket(socket: WebSocket, rooms: RoomMap) {
         }
     }
 
-    // Task: forward from channel to WebSocket sink + send periodic pings
+    // Task: forward from channel to WebSocket sink + send periodic pings.
+    // All writes have a 10s timeout to detect stuck connections (e.g. Fly proxy stall).
     let write_task = tokio::spawn(async move {
         let mut ping_interval = tokio::time::interval(std::time::Duration::from_secs(15));
         ping_interval.tick().await; // skip immediate tick
@@ -212,34 +222,61 @@ async fn handle_socket(socket: WebSocket, rooms: RoomMap) {
                 msg = rx.recv() => {
                     match msg {
                         Some(m) => {
-                            if ws_tx.send(m).await.is_err() {
-                                break;
+                            match tokio::time::timeout(
+                                std::time::Duration::from_secs(10),
+                                ws_tx.send(m),
+                            ).await {
+                                Ok(Ok(())) => {}
+                                Ok(Err(e)) => {
+                                    eprintln!("[relay] Write error for peer: {e}");
+                                    break;
+                                }
+                                Err(_) => {
+                                    eprintln!("[relay] Write timeout (10s), connection stuck");
+                                    break;
+                                }
                             }
                         }
                         None => break,
                     }
                 }
                 _ = ping_interval.tick() => {
-                    if ws_tx.send(Message::Ping(vec![].into())).await.is_err() {
-                        break;
+                    match tokio::time::timeout(
+                        std::time::Duration::from_secs(10),
+                        ws_tx.send(Message::Ping(vec![].into())),
+                    ).await {
+                        Ok(Ok(())) => {}
+                        _ => {
+                            eprintln!("[relay] Ping write failed/timeout");
+                            break;
+                        }
                     }
                 }
             }
         }
+        eprintln!("[relay] Write task exited for a peer");
     });
 
     // Read from WebSocket, forward to the OTHER peer in the room.
-    // No idle timeout — peers stay connected as long as WebSocket is alive.
-    // The relay's periodic pings (above) keep the TCP connection alive and
-    // detect dead peers at the transport level.
+    // Uses select! to also detect write_task death — if the write side is
+    // stuck/dead, we should tear down the whole connection.
     let rooms_read = rooms.clone();
     let room_id_read = room_id.clone();
+    let mut write_task = write_task; // make mutable for &mut in select!
 
     loop {
-        let msg = match ws_rx.next().await {
-            Some(Ok(m)) => m,
-            _ => {
-                eprintln!("[relay] Peer {} stream ended", peer_id);
+        let msg = tokio::select! {
+            result = ws_rx.next() => {
+                match result {
+                    Some(Ok(m)) => m,
+                    _ => {
+                        eprintln!("[relay] Peer {} stream ended", peer_id);
+                        break;
+                    }
+                }
+            }
+            _ = &mut write_task => {
+                eprintln!("[relay] Peer {} write task died, closing connection", peer_id);
                 break;
             }
         };
@@ -249,7 +286,38 @@ async fn handle_socket(socket: WebSocket, rooms: RoomMap) {
                 eprintln!("[relay] Peer {} sent close", peer_id);
                 break;
             }
-            Message::Ping(_) | Message::Pong(_) => continue,
+            Message::Ping(d) => {
+                // Respond with pong (WebSocket protocol requirement)
+                let pong = Message::Pong(d.clone());
+                let rooms_tmp = rooms_read.clone();
+                let room_id_tmp = room_id_read.clone();
+                // Send pong via the peer's own channel
+                let map = rooms_tmp.lock().await;
+                if let Some(room) = map.get(&room_id_tmp) {
+                    if let Some(peer) = room.peers.iter().find(|p| p.id == peer_id) {
+                        let _ = peer.tx.send(pong);
+                    }
+                }
+                // Also update activity
+                drop(map);
+                let mut map = rooms_tmp.lock().await;
+                if let Some(room) = map.get_mut(&room_id_tmp) {
+                    if let Some(peer) = room.peers.iter_mut().find(|p| p.id == peer_id) {
+                        peer.last_activity = tokio::time::Instant::now();
+                    }
+                }
+                continue;
+            }
+            Message::Pong(_) => {
+                // Update activity on pong — peer is alive and responding
+                let mut map = rooms_read.lock().await;
+                if let Some(room) = map.get_mut(&room_id_read) {
+                    if let Some(peer) = room.peers.iter_mut().find(|p| p.id == peer_id) {
+                        peer.last_activity = tokio::time::Instant::now();
+                    }
+                }
+                continue;
+            }
             _ => {}
         }
 
@@ -310,6 +378,7 @@ async fn handle_socket(socket: WebSocket, rooms: RoomMap) {
     // Cleanup: remove this peer and notify remaining peers
     eprintln!("[relay] Peer {} disconnected, cleaning up", peer_id);
     write_task.abort();
+    let _write_task = write_task;
     {
         let mut map = rooms.lock().await;
         if let Some(room) = map.get_mut(&room_id) {

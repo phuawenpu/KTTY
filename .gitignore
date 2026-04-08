@@ -72,3 +72,19 @@ chromium-wrapper.sh
 
 # Rust build artifacts
 backend/target/
+tests/mlkem_interop/rust_baseline/target/
+
+# Gradle cache
+.gradle/
+
+# Shell/terminal escape sequence artifacts
+2004h*
+3r*
+4r*
+[0-9]*H*
+-2004h*
+-4r
+-bash:*
+-workspace
+S
+.bash_history

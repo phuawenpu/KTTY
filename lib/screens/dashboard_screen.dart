@@ -255,6 +255,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
             Image.asset('assets/ktty_logo.png', height: 24),
             const SizedBox(width: 6),
             const Text('KTTY'),
+            const SizedBox(width: 8),
+            Text(
+              'v$kAppVersion ${kAppBuildTime == 'dev' ? '' : kAppBuildTime}',
+              style: const TextStyle(fontSize: 10, color: Colors.white38),
+            ),
           ],
         ),
         backgroundColor: const Color(0xFF16213E),

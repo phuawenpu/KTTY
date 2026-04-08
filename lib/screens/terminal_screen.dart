@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
+import 'package:speech_to_text/speech_to_text.dart' as stt;
 import '../config/constants.dart';
 import '../models/connection_state.dart';
 import '../models/viewport_mode.dart';
@@ -31,6 +32,11 @@ class _TerminalScreenState extends State<TerminalScreen> {
   final _terminalKey = GlobalKey<TerminalContainerState>();
   double _displayFontSize = 14.0;
 
+  // Speech-to-text
+  final stt.SpeechToText _speech = stt.SpeechToText();
+  bool _speechAvailable = false;
+  bool _isListening = false;
+
   @override
   void initState() {
     super.initState();
@@ -42,6 +48,50 @@ class _TerminalScreenState extends State<TerminalScreen> {
         widget.terminalService.sendResize(t.viewWidth, t.viewHeight);
       }
     });
+    _initSpeech();
+  }
+
+  Future<void> _initSpeech() async {
+    _speechAvailable = await _speech.initialize(
+      onError: (error) {
+        print('[KTTY] Speech error: ${error.errorMsg}');
+        setState(() => _isListening = false);
+      },
+      onStatus: (status) {
+        print('[KTTY] Speech status: $status');
+        if (status == 'done' || status == 'notListening') {
+          setState(() => _isListening = false);
+        }
+      },
+    );
+    print('[KTTY] Speech available: $_speechAvailable');
+  }
+
+  void _toggleSpeech() {
+    if (!_speechAvailable) {
+      print('[KTTY] Speech not available');
+      return;
+    }
+
+    if (_isListening) {
+      _speech.stop();
+      setState(() => _isListening = false);
+    } else {
+      setState(() => _isListening = true);
+      _speech.listen(
+        onResult: (result) {
+          if (result.finalResult) {
+            final text = result.recognizedWords;
+            if (text.isNotEmpty) {
+              print('[KTTY] Speech result: "$text"');
+              widget.terminalService.sendText(text);
+            }
+          }
+        },
+        listenMode: stt.ListenMode.dictation,
+        cancelOnError: true,
+      );
+    }
   }
 
   void _onKeyPressed(String value) {
@@ -165,7 +215,7 @@ class _TerminalScreenState extends State<TerminalScreen> {
                         setState(() => _displayFontSize = size);
                       },
                       onWordTapped: (word) {
-                        widget.terminalService.terminal.textInput(word);
+                        widget.terminalService.sendText(word);
                       },
                     ),
                   ),
@@ -177,8 +227,11 @@ class _TerminalScreenState extends State<TerminalScreen> {
                       viewportMode: vs.mode,
                       onGetSelectedText: _getSelectedText,
                       onPaste: (text) {
-                        widget.terminalService.terminal.paste(text);
+                        print('[KTTY] Pasting ${text.length} chars');
+                        widget.terminalService.sendText(text);
                       },
+                      onMicPressed: _toggleSpeech,
+                      isListening: _isListening,
                     ),
                   ),
                 ],

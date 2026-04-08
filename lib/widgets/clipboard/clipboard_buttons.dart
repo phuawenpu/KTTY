@@ -43,7 +43,10 @@ class ClipboardButtons extends StatelessWidget {
   void _onPaste() async {
     final data = await Clipboard.getData('text/plain');
     if (data?.text != null && data!.text!.isNotEmpty) {
+      print('[KTTY] Clipboard read: ${data!.text!.length} chars');
       onPaste?.call(data.text!);
+    } else {
+      print('[KTTY] Clipboard empty or no text data');
     }
   }
 

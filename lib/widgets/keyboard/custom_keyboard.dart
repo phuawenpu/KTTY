@@ -14,6 +14,8 @@ class CustomKeyboard extends StatefulWidget {
   final String Function()? onGetSelectedText;
   final ValueChanged<String>? onPaste;
   final bool pinEntryMode;
+  final VoidCallback? onMicPressed;
+  final bool isListening;
 
   const CustomKeyboard({
     super.key,
@@ -23,6 +25,8 @@ class CustomKeyboard extends StatefulWidget {
     this.onGetSelectedText,
     this.onPaste,
     this.pinEntryMode = false,
+    this.onMicPressed,
+    this.isListening = false,
   });
 
   @override
@@ -109,6 +113,8 @@ class _CustomKeyboardState extends State<CustomKeyboard>
                       isUpperCase: ks.isUpperCase,
                       ctrlActive: ks.ctrlActive,
                       onKeyPressed: (v) => _onKeyPressed(context, v),
+                      onSpaceLongPress: widget.onMicPressed,
+                      spaceLongPressActive: widget.isListening,
                     )),
                     // Left edge handle (123 numeric)
                     _buildEdgeHandle(
@@ -180,7 +186,7 @@ class _CustomKeyboardState extends State<CustomKeyboard>
                     final value = pinValues[row][col];
                     return Expanded(
                       child: Padding(
-                        padding: const EdgeInsets.all(3),
+                        padding: const EdgeInsets.all(2.25),
                         child: Material(
                           color: const Color(0xFF0F3460),
                           borderRadius: BorderRadius.circular(8),

@@ -51,20 +51,18 @@ class _KttyAppState extends State<KttyApp> with WidgetsBindingObserver {
     switch (state) {
       case AppLifecycleState.paused:
       case AppLifecycleState.hidden:
-        // Start background timer — close WS after 90s to save resources
+        // Android kills the WS connection almost immediately when backgrounded.
+        // Suppress auto-reconnect while in background — it will fail anyway
+        // (DNS/network suspended). We'll reconnect on resume instead.
         _backgroundTimer?.cancel();
-        _backgroundTimer = Timer(const Duration(seconds: 90), () {
-          print('[KTTY] Background timeout — closing WS (credentials preserved)');
-          _wsService.backgroundClose();
-        });
+        _wsService.suppressReconnect();
         break;
 
       case AppLifecycleState.resumed:
-        // Cancel background timer if we returned quickly
         _backgroundTimer?.cancel();
         _backgroundTimer = null;
 
-        // Auto-reconnect if we were connected and WS died
+        print('[KTTY] Resumed: status=${_sessionState.status}, wsConnected=${_wsService.isConnected}');
         if (_sessionState.status == ConnectionStatus.connected ||
             _sessionState.status == ConnectionStatus.syncing) {
           if (!_wsService.isConnected) {
@@ -74,6 +72,8 @@ class _KttyAppState extends State<KttyApp> with WidgetsBindingObserver {
           } else {
             print('[KTTY] Resumed — WS still alive');
           }
+        } else {
+          print('[KTTY] Resumed but status=${_sessionState.status}, not reconnecting');
         }
         break;
 

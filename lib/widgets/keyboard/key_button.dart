@@ -6,6 +6,8 @@ class KeyButton extends StatelessWidget {
   final bool isUpperCase;
   final bool ctrlActive;
   final ValueChanged<String> onKeyPressed;
+  final VoidCallback? onLongPress;
+  final bool longPressActive;
 
   const KeyButton({
     super.key,
@@ -13,6 +15,8 @@ class KeyButton extends StatelessWidget {
     required this.isUpperCase,
     required this.ctrlActive,
     required this.onKeyPressed,
+    this.onLongPress,
+    this.longPressActive = false,
   });
 
   String get _displayLabel {
@@ -48,12 +52,13 @@ class KeyButton extends StatelessWidget {
     return Expanded(
       flex: (keyDef.flex * 10).round(),
       child: Padding(
-        padding: const EdgeInsets.all(3.0),
+        padding: const EdgeInsets.all(2.25),
         child: Material(
-          color: const Color(0xFF2A2A4A),
+          color: longPressActive ? const Color(0xFFE53935) : const Color(0xFF2A2A4A),
           borderRadius: BorderRadius.circular(5),
           child: InkWell(
             onTap: _handleTap,
+            onLongPress: onLongPress,
             borderRadius: BorderRadius.circular(5),
             splashColor: const Color(0xFF4A4A6A),
             highlightColor: const Color(0xFF3A3A5C),
@@ -61,19 +66,37 @@ class KeyButton extends StatelessWidget {
               decoration: BoxDecoration(
                 borderRadius: BorderRadius.circular(5),
                 border: Border.all(
-                  color: const Color(0xFF4A4A6A),
+                  color: longPressActive ? const Color(0xFFE53935) : const Color(0xFF4A4A6A),
                   width: 0.5,
                 ),
               ),
               child: Center(
-                child: Text(
-                  _displayLabel,
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontSize: keyDef.label.length > 2 ? 13.8 : 19.1,
-                    fontWeight: FontWeight.w500,
-                  ),
-                ),
+                child: longPressActive
+                    ? const Icon(Icons.mic, color: Colors.white, size: 20)
+                    : onLongPress != null
+                        ? Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Text(
+                                _displayLabel,
+                                style: TextStyle(
+                                  color: Colors.white,
+                                  fontSize: keyDef.label.length > 2 ? 13.8 : 19.1,
+                                  fontWeight: FontWeight.w500,
+                                ),
+                              ),
+                              const SizedBox(width: 6),
+                              const Icon(Icons.mic_none, color: Colors.white38, size: 14),
+                            ],
+                          )
+                        : Text(
+                            _displayLabel,
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: keyDef.label.length > 2 ? 13.8 : 19.1,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
               ),
             ),
           ),

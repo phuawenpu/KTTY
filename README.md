@@ -1,54 +1,124 @@
 # KTTY - Secure Mobile Terminal Relay
 
 ## Overview
-KTTY is a highly secure, resilient, fixed-proportion mobile terminal emulator built with Flutter. It is designed to interface with a remote Golang host agent via an untrusted cloud relay. The application provides a full programmer's environment on mobile devices, completely bypassing native OS keyboards and orientation restrictions to provide a desktop-grade terminal experience.
+KTTY is a secure mobile terminal emulator built with Flutter that connects to a Linux host agent via an untrusted cloud relay. All terminal data is end-to-end encrypted using post-quantum cryptography (ML-KEM 768 + XChaCha20-Poly1305). The cloud relay is a stateless message forwarder that cannot read or tamper with terminal data.
+
+## Architecture
+
+```
+Flutter App  <--WSS-->  Cloud Relay (Fly.io)  <--WSS-->  Linux Agent
+  (phone)               (message forwarder)              (PTY + shell)
+```
+
+- **Flutter App**: Custom keyboard, terminal emulator (xterm.dart), ML-KEM handshake via Rust FFI
+- **Cloud Relay**: Rust/Axum WebSocket relay with room-based routing, auth tokens, stale peer cleanup
+- **Linux Agent**: Rust binary that spawns a PTY (via tmux), bridges PTY I/O over encrypted WebSocket
 
 ## Core Features
-* **Zero-Trust Architecture:** End-to-End Encryption (XChaCha20-Poly1305) and Post-Quantum Key Exchange (ML-KEM/Kyber) ensure the cloud relay cannot intercept, tamper with, or read terminal data.
-* **Custom Programmer Keyboard:** A gesture-based, multi-layered custom keyboard optimized for terminal input. It features a persistent control cluster (`Ctrl`, `Tab`, `Esc`, Arrows) and uses swipe gestures to access numeric and extended symbol layers.
-* **Resilient State Management:** Built to survive mobile network drops. Features include sequence tracking, visual liveliness indicators (Green/Yellow/Red), and defensive UI locks that disable the keyboard during sync phases to prevent blind input.
-* **Strict Display Modes:** * **Portrait (Interactive):** A 65/35 vertical split between the terminal emulator (`xterm`) and the custom keyboard.
-  * **Landscape (Read-Only):** Forces 100% terminal width for reading wide log files, completely hiding the keyboard and preventing text input.
+- **Post-Quantum Encryption**: ML-KEM 768 key exchange + XChaCha20-Poly1305 via Rust FFI (flutter_rust_bridge)
+- **Custom Programmer Keyboard**: Multi-layer (ABC/123/SYM), swipe drawers, control cluster (Ctrl, Tab, Esc, arrows)
+- **Speech-to-Text**: Long-press Space key to dictate (Android speech recognition)
+- **Seamless Reconnection**: Agent stays connected to relay across Flutter disconnects; 45s heartbeat timeout detects dead connections; ring buffer replays PTY history on reconnect
+- **Local Echo**: Instant keystroke display with 50ms batched send and server echo suppression
+- **Pinch Zoom**: Two-finger zoom on terminal
+- **Double-Tap Word Capture**: Double-tap a word in terminal output to type it at the cursor
 
-## Local Development & Setup
-
-KTTY is designed to be developed entirely independently of the Golang backend. You can build the UI and test terminal emulation by standing up a local Mock WebSocket server that adheres to the established Interface Contract.
+## Running
 
 ### Prerequisites
-* [Flutter SDK](https://flutter.dev/docs/get-started/install) (Stable Channel)
-* Dart 3.x
+- Flutter SDK (stable channel, Dart 3.11+)
+- Rust toolchain (for agent, relay, and Flutter FFI bridge)
+- Android device or emulator
 
-### Getting Started
-1. Clone the repository:
-   ```bash
-   git clone <repository_url>
-   cd ktty
-   ```
-2. Install dependencies:
-   ```bash
-   flutter pub get
-   ```
-3. Run the application:
-   ```bash
-   flutter run
-   ```
+### 1. Cloud Relay
 
-## The Interface Contract (API Boundary)
-If you are building a local mock server for testing, KTTY communicates exclusively via WebSockets using the following unencrypted routing and encrypted data envelopes. 
+Already deployed at `wss://ktty-relay.fly.dev`. To redeploy:
 
-**1. Room Join (Unencrypted)**
-```json
-{"action": "join", "room_id": "<SHA-256 Hash of PIN>"}
+```bash
+cd backend
+fly deploy
 ```
 
-**2. Standard Data Stream (Encrypted Envelope)**
-All terminal I/O and system commands use this structure. The `payload` must be decrypted using the negotiated XChaCha20 key.
-```json
-{
-  "seq": 402,
-  "type": "pty", 
-  "payload": "<Base64 Encoded XChaCha20 Ciphertext>"
-}
+To run locally:
+
+```bash
+cd backend/relay
+cargo run -- 8080
 ```
 
-*For complete details on the ML-KEM handshake, Out-of-Band (OOB) command types, and sequence recovery limits, please refer to the primary KTTY Engineering Specification document.*
+### 2. Linux Agent
+
+```bash
+# Build
+cd backend/agent
+cargo build --release
+
+# Run (connects to deployed relay)
+./target/release/ktty-agent --relay-url wss://ktty-relay.fly.dev
+
+# Or with a local relay
+./target/release/ktty-agent --relay-url ws://localhost:8080
+```
+
+The agent prompts for a numeric PIN. Use the same PIN in the Flutter app.
+
+### 3. Flutter App
+
+```bash
+# Install dependencies
+flutter pub get
+
+# Run debug build on connected device
+flutter run --debug --dart-define="BUILD_TIME=$(date -u +'%Y-%m-%d %H:%M UTC')"
+
+# Build release APK
+flutter build apk --release --dart-define="BUILD_TIME=$(date -u +'%Y-%m-%d %H:%M UTC')"
+
+# Install on specific device
+flutter run --release --device-id <DEVICE_ID> --dart-define="BUILD_TIME=$(date -u +'%Y-%m-%d %H:%M UTC')"
+```
+
+### Connection Flow
+
+1. Start the agent on your Linux host — it prints a room ID and waits
+2. Open the Flutter app, enter the relay URL (`wss://ktty-relay.fly.dev/ws`) and the same PIN
+3. ML-KEM handshake establishes a shared secret; all subsequent traffic is encrypted
+4. Terminal session is live — type on the custom keyboard, output appears in real-time
+
+## Project Structure
+
+```
+lib/                          Flutter app
+  app.dart                    App lifecycle, reconnection
+  config/constants.dart       Version, terminal config
+  screens/
+    dashboard_screen.dart     Connection page (URL + PIN entry)
+    terminal_screen.dart      Terminal + keyboard layout
+  services/
+    crypto/                   Rust FFI crypto (ML-KEM, XChaCha20, Argon2id)
+    terminal/                 Terminal I/O, local echo, ring buffer sync
+    websocket/                WebSocket connection, handshake, reconnect
+  widgets/
+    keyboard/                 Custom keyboard (ABC/123/SYM layers, control cluster)
+    terminal/                 Terminal container, selection handles, pinch zoom
+    clipboard/                Copy/paste/mark buttons
+rust/                         Rust FFI bridge crate (ktty_bridge)
+backend/
+  agent/                      Linux agent (PTY, ML-KEM, encrypted WS bridge)
+  relay/                      Cloud relay (Axum, room routing, auth tokens)
+  common/                     Shared Rust crate (crypto, message types)
+```
+
+## Interface Contract
+
+**Room Join (unencrypted)**
+```json
+{"action": "join", "room_id": "<SHA-256 of derived key>"}
+```
+
+**Encrypted Data Envelope**
+```json
+{"seq": 1, "type": "pty", "payload": "<Base64 XChaCha20 ciphertext>"}
+```
+
+Message types: `pty` (terminal I/O), `resize`, `sync_req`, `sync_warn`, `sys_kill`, `disconnect`

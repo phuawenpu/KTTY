@@ -34,6 +34,15 @@ class TerminalService {
     return terminal.buffer.getText(selection);
   }
 
+  /// Send text directly to the PTY as if the user typed it.
+  /// More reliable than terminal.textInput() for injecting words
+  /// because it bypasses xterm internals and goes straight to the send buffer.
+  void sendText(String text) {
+    final bytes = utf8.encode(text);
+    _inputBuffer.addAll(bytes);
+    _inputFlushTimer ??= Timer(_inputFlushInterval, _flushInput);
+  }
+
   final _pendingTimestamps = <int, int>{};
 
   void attach() {
@@ -44,11 +53,16 @@ class TerminalService {
       // Local echo: show printable characters immediately so the user
       // doesn't wait for the server round-trip. Track what we echoed
       // so we can suppress the duplicate when the server echoes back.
-      // Control characters are never locally echoed.
-      for (final b in bytes) {
-        if (b >= 0x20 && b <= 0x7E) {
-          terminal.write(String.fromCharCode(b));
-          _predictedEcho.add(b);
+      // Skip local echo entirely if the data contains escape sequences
+      // (e.g. terminal query responses like DA, DECRPM) — those are not
+      // user-typed characters and would show as garbage like ";OR;OR".
+      final hasEscape = bytes.contains(0x1B);
+      if (!hasEscape) {
+        for (final b in bytes) {
+          if (b >= 0x20 && b <= 0x7E) {
+            terminal.write(String.fromCharCode(b));
+            _predictedEcho.add(b);
+          }
         }
       }
 
@@ -145,16 +159,12 @@ class TerminalService {
       final json = jsonDecode(raw) as Map<String, dynamic>;
       final type = json['type'] as String?;
 
-      // Skip handshake messages
-      if (type == 'handshake') return;
+      // Skip handshake/boot messages — these are internal handshake signals,
+      // not terminal data. The boot signal arrives during normal reconnection.
+      if (type == 'handshake' || type == 'boot') return;
 
-      // Agent restarted — clear terminal and show message
-      if (type == 'boot' || json['action'] == 'join') {
-        print('[KTTY] Agent restarted, clearing terminal');
-        terminal.write('\x1b[2J\x1b[H');
-        terminal.write('\r\n*** Session ended. Use exit button to reconnect. ***\r\n');
-        return;
-      }
+      // Join notification from relay — ignore (handled by handshake flow)
+      if (json['action'] == 'join') return;
 
       if (type == 'pty') {
         final payload = json['payload'] as String;
@@ -230,16 +240,15 @@ class TerminalService {
     }
   }
 
-  /// Re-attach after an auto-reconnect. Clears terminal and requests
-  /// the agent to replay its ring buffer so TUI state is restored.
+  /// Re-attach after an auto-reconnect. Silently re-establishes the
+  /// terminal bridge and requests ring buffer sync from the agent.
+  /// Does NOT clear the screen — the existing buffer stays visible
+  /// while sync restores the current state in the background.
   void reattachAfterReconnect() {
-    // Re-attach if not currently attached
     if (terminal.onOutput == null) {
       attach();
     }
-    // Clear screen and request sync from agent
-    terminal.write('\x1b[2J\x1b[H');
-    terminal.write('\r\n*** Reconnecting... ***\r\n');
+    _predictedEcho.clear();
     _requestSync();
   }
 

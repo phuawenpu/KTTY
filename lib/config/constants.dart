@@ -1,3 +1,6 @@
+const int kAppVersion = 7;
+const String kAppBuildTime = String.fromEnvironment('BUILD_TIME', defaultValue: 'dev');
+
 const int kTerminalMaxLines = 1000;
 const int kDefaultCols = 80;
 const int kDefaultRows = 24;

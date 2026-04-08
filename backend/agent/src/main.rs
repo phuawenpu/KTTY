@@ -36,12 +36,14 @@ async fn main() -> anyhow::Result<()> {
     std::io::stderr().flush()?;
     let mut pin = String::new();
     std::io::stdin().read_line(&mut pin)?;
-    let pin = pin.trim().to_string();
+    // Strip to digits only
+    let pin: String = pin.trim().chars().filter(|c| c.is_ascii_digit()).collect();
 
     if pin.is_empty() {
-        eprintln!("PIN cannot be empty");
+        eprintln!("PIN cannot be empty (digits only)");
         std::process::exit(1);
     }
+    eprintln!("PIN: {} ({} digits)", pin, pin.len());
 
     // Derive key (this takes a few seconds due to Argon2id)
     eprintln!("Deriving key...");
@@ -71,13 +73,17 @@ async fn main() -> anyhow::Result<()> {
         let sess = session::Session::new(cli.relay_url.clone(), derived_key);
 
         match sess.run(pty_handle.take().unwrap()).await {
-            Ok(()) => {
-                eprintln!("[agent] Session ended (shell exited), respawning...");
-                // Shell exited — pty_handle is None, will respawn next iteration
+            Ok(Some(recovered_pty)) => {
+                eprintln!("[agent] Session ended, PTY preserved. Reconnecting...");
+                pty_handle = Some(recovered_pty);
+            }
+            Ok(None) => {
+                eprintln!("[agent] Session ended, shell exited. Will respawn...");
+                // pty_handle stays None → will respawn next iteration
             }
             Err(e) => {
                 eprintln!("[agent] Session error: {e}, reconnecting...");
-                // WS error — PTY is gone (moved into session), need new one
+                // PTY is gone (moved into session), need new one
             }
         }
 

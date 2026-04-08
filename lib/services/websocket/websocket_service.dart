@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
+import 'package:flutter/foundation.dart' show VoidCallback;
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:web_socket_channel/io.dart';
 import '../../config/constants.dart';
@@ -21,8 +22,11 @@ class WebSocketService {
   int _reconnectAttempts = 0;
   String? _lastUrl;
   String? _lastPin;
+  bool _autoReconnectEnabled = false;
+  String? _relayAuthToken;
 
   ConnectionStateCallback? onConnectionChanged;
+  VoidCallback? onReconnected;
 
   Stream<String> get messages => _messageController.stream;
   bool get isConnected => _channel != null;
@@ -49,10 +53,26 @@ class WebSocketService {
       await _channel!.ready;
     }
 
+    _autoReconnectEnabled = true;
+
     _subscription = _channel!.stream.listen(
       (data) {
-        print('[KTTY-WS] Received: ${(data as String).substring(0, (data as String).length.clamp(0, 100))}');
-        _messageController.add(data as String);
+        final str = data as String;
+        print('[KTTY-WS] Received: ${str.substring(0, str.length.clamp(0, 100))}');
+
+        // Intercept relay auth token
+        if (str.contains('"type"') && str.contains('"auth"')) {
+          try {
+            final json = jsonDecode(str) as Map<String, dynamic>;
+            if (json['type'] == 'auth' && json['token'] != null) {
+              _relayAuthToken = json['token'] as String;
+              print('[KTTY-WS] Received relay auth token');
+              return; // Don't forward auth messages to terminal
+            }
+          } catch (_) {}
+        }
+
+        _messageController.add(str);
       },
       onError: (error) {
         print('[KTTY-WS] Stream error: $error');
@@ -69,9 +89,31 @@ class WebSocketService {
   void _handleDisconnect() {
     print('[KTTY-WS] Disconnected');
     _channel = null;
+    _relayAuthToken = null;
     onConnectionChanged?.call(false);
-    // Don't auto-reconnect — let the user manually reconnect from dashboard
-    // Auto-reconnect causes overlapping connections and session chaos
+    if (_autoReconnectEnabled) {
+      _scheduleReconnect();
+    }
+  }
+
+  /// Called by app lifecycle observer to reconnect after returning from background.
+  void attemptReconnect() {
+    if (_lastUrl == null || _lastPin == null) return;
+    _autoReconnectEnabled = true;
+    _reconnectAttempts = 0;
+    _scheduleReconnect();
+  }
+
+  /// Close the WS channel without clearing credentials.
+  /// Used by background timer to release resources while preserving reconnect ability.
+  void backgroundClose() {
+    print('[KTTY-WS] Background close (preserving credentials)');
+    _subscription?.cancel();
+    _subscription = null;
+    _channel?.sink.close();
+    _channel = null;
+    _crypto = null;
+    _relayAuthToken = null;
   }
 
   void _scheduleReconnect() {
@@ -94,8 +136,12 @@ class WebSocketService {
         await performHandshake(_lastPin!);
         _reconnectAttempts = 0;
         onConnectionChanged?.call(true);
+        onReconnected?.call();
       } catch (e) {
         print('[KTTY-WS] Reconnect failed: $e');
+        if (_autoReconnectEnabled) {
+          _scheduleReconnect();
+        }
       }
     });
   }
@@ -105,35 +151,39 @@ class WebSocketService {
     _reconnectTimer = null;
   }
 
-  /// Join room and wait for agent to respond.
-  /// TODO: Re-enable ML-KEM handshake once flutter_rust_bridge crypto FFI is implemented.
+  /// Join room, perform ML-KEM handshake, establish encrypted session.
   Future<void> performHandshake(String pin) async {
     _lastPin = pin;
+    final derivedKey = await PinUtils.deriveKey(pin);
     final roomId = await PinUtils.hashPin(pin);
 
-    // Send join
-    print('[KTTY-WS] Sending join with room_id: ${roomId.substring(0, 8)}...');
+    // 1. Send join
+    print('[KTTY-WS] Room ID: $roomId');
     sendJson({'action': 'join', 'room_id': roomId});
 
-    // Plain-text mode — no encryption
-    print('[KTTY-WS] Plain-text mode (no encryption)');
-    _crypto = null;
+    // 2. Wait for agent's boot signal and then handshake offer (ML-KEM public key)
+    print('[KTTY-WS] Waiting for agent handshake offer (15s)...');
+    String? mlkemPubKeyB64;
 
-    // Wait for agent to send ANY pty data (proves agent is in the same room)
-    print('[KTTY-WS] Waiting for agent response (15s)...');
     await messages.firstWhere((msg) {
       try {
         final json = jsonDecode(msg) as Map<String, dynamic>;
         final type = json['type'] as String?;
-        if (type == 'pty') {
-          print('[KTTY-WS] Agent responded with PTY data');
+
+        // Agent sends handshake offer with ML-KEM encapsulation key
+        if (type == 'handshake' && json['mlkem_pub_key'] != null) {
+          mlkemPubKeyB64 = json['mlkem_pub_key'] as String;
+          print('[KTTY-WS] Received ML-KEM public key');
           return true;
         }
+
+        // Boot signal means agent is alive, keep waiting for handshake
         if (type == 'boot') {
-          print('[KTTY-WS] Agent sent boot signal');
-          return true;
+          print('[KTTY-WS] Agent sent boot signal, waiting for handshake...');
+          return false;
         }
-        print('[KTTY-WS] Waiting... got: ${msg.substring(0, msg.length.clamp(0, 50))}');
+
+        print('[KTTY-WS] Waiting... got type=$type');
         return false;
       } catch (_) {
         return false;
@@ -144,8 +194,54 @@ class WebSocketService {
         'No agent found. Check PIN and ensure the host agent is running.',
       ),
     );
-    print('[KTTY-WS] Connected to agent');
+
+    // 3. Encapsulate shared secret using agent's ML-KEM public key
+    final ekBytes = Uint8List.fromList(base64Decode(mlkemPubKeyB64!));
+    print('[KTTY-WS] Encapsulating shared secret (ML-KEM 768)...');
+    final result = await HandshakeService.encapsulate(ekBytes);
+
+    // 4. Send ciphertext back to agent
+    sendJson({
+      'type': 'handshake',
+      'mlkem_ciphertext': base64Encode(result.ciphertext),
+    });
+    print('[KTTY-WS] Sent ML-KEM ciphertext to agent');
+
+    // 5. Wait for agent's HMAC verification
+    print('[KTTY-WS] Waiting for HMAC verification (10s)...');
+    await messages.firstWhere((msg) {
+      try {
+        final json = jsonDecode(msg) as Map<String, dynamic>;
+        final type = json['type'] as String?;
+        if (type == 'handshake' && json['hmac'] != null) {
+          final hmacB64 = json['hmac'] as String;
+          _pendingHmacVerification = (derivedKey, result.sharedSecret, hmacB64);
+          return true;
+        }
+        return false;
+      } catch (_) {
+        return false;
+      }
+    }).timeout(
+      const Duration(seconds: 10),
+      onTimeout: () => throw Exception('Handshake HMAC timeout'),
+    );
+
+    // 6. Verify HMAC and establish encrypted session
+    final (key, ss, hmacB64) = _pendingHmacVerification!;
+    _pendingHmacVerification = null;
+    final hmacBytes = Uint8List.fromList(base64Decode(hmacB64));
+    final valid = await HandshakeService.verifyHmac(key, ss, hmacBytes);
+    if (!valid) {
+      throw Exception('HMAC verification failed — possible MITM attack');
+    }
+
+    _crypto = CryptoService(ss);
+    print('[KTTY-WS] Handshake verified, encrypted mode');
   }
+
+  // Temp storage for HMAC data between stream callback and async verification
+  (Uint8List, Uint8List, String)? _pendingHmacVerification;
 
   /// Send an encrypted envelope.
   Future<void> sendEncrypted(int seq, String type, List<int> payload) async {
@@ -182,6 +278,10 @@ class WebSocketService {
   }
 
   void sendJson(Map<String, dynamic> json) {
+    // Include relay auth token if we have one (skip for join/handshake messages)
+    if (_relayAuthToken != null && json['action'] != 'join') {
+      json['auth'] = _relayAuthToken;
+    }
     send(jsonEncode(json));
   }
 
@@ -193,9 +293,15 @@ class WebSocketService {
   }
 
   void disconnect() {
+    _autoReconnectEnabled = false;
     _cancelReconnect();
+    // Notify agent before closing
+    try {
+      sendJson({'type': 'disconnect'});
+    } catch (_) {}
     _cleanupChannel();
     _crypto = null;
+    _relayAuthToken = null;
     _lastUrl = null;
     _lastPin = null;
   }

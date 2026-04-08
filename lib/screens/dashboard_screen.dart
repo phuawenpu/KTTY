@@ -29,6 +29,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   final _urlController = TextEditingController(text: 'wss://ktty-relay.fly.dev/ws');
   final _pinController = TextEditingController();
   bool _connecting = false;
+  bool _pinVisible = false;
 
   // Track which field is focused
   final _urlFocusNode = FocusNode();
@@ -154,7 +155,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
   Future<void> _connect() async {
     final session = context.read<SessionState>();
     final url = _urlController.text.trim();
-    final pin = _pinController.text.trim();
+    // Strip to digits only
+    final pin = _pinController.text.trim().replaceAll(RegExp(r'[^0-9]'), '');
 
     if (url.isEmpty || pin.isEmpty) return;
 
@@ -184,6 +186,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
       await widget.wsService.performHandshake(pin);
       print('[KTTY] Agent found.');
 
+      // Clear any stale content from previous session before attaching
+      widget.terminalService.terminal.write('\x1b[2J\x1b[H');
       widget.terminalService.attach();
       session.setStatus(ConnectionStatus.connected);
 
@@ -322,11 +326,19 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     focusNode: _pinFocusNode,
                     readOnly: true,
                     showCursor: true,
-                    obscureText: true,
+                    obscureText: !_pinVisible,
                     style: const TextStyle(color: Colors.white),
                     decoration: InputDecoration(
                       labelText: 'PIN',
                       labelStyle: const TextStyle(color: Colors.white54),
+                      suffixIcon: IconButton(
+                        icon: Icon(
+                          _pinVisible ? Icons.visibility_off : Icons.visibility,
+                          color: Colors.white38,
+                          size: 20,
+                        ),
+                        onPressed: () => setState(() => _pinVisible = !_pinVisible),
+                      ),
                       enabledBorder: OutlineInputBorder(
                         borderSide: BorderSide(
                           color: _activeController == _pinController
@@ -366,6 +378,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
             flex: kPortraitKeyboardFlex,
             child: CustomKeyboard(
               onKeyPressed: _onKeyPressed,
+              pinEntryMode: _activeController == _pinController,
             ),
           ),
         ],

@@ -163,6 +163,28 @@ class TerminalService {
     }
   }
 
+  /// Re-attach after an auto-reconnect. Clears terminal and requests
+  /// the agent to replay its ring buffer so TUI state is restored.
+  void reattachAfterReconnect() {
+    // Re-attach if not currently attached
+    if (terminal.onOutput == null) {
+      attach();
+    }
+    // Clear screen and request sync from agent
+    terminal.write('\x1b[2J\x1b[H');
+    terminal.write('\r\n*** Reconnecting... ***\r\n');
+    _requestSync();
+  }
+
+  Future<void> _requestSync() async {
+    try {
+      await _ws.sendSyncRequest(_seq);
+      print('[KTTY] Sync request sent (last_seq=$_seq)');
+    } catch (e) {
+      print('[KTTY] Failed to send sync request: $e');
+    }
+  }
+
   void detach() {
     terminal.onOutput = null;
     terminal.onResize = null;

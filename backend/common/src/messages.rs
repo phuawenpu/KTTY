@@ -47,6 +47,8 @@ pub struct EncryptedEnvelope {
     pub seq: u64,
     pub r#type: String,
     pub payload: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth: Option<String>,
 }
 
 impl EncryptedEnvelope {
@@ -55,7 +57,13 @@ impl EncryptedEnvelope {
             seq,
             r#type: msg_type.to_string(),
             payload: payload_b64,
+            auth: None,
         }
+    }
+
+    pub fn with_auth(mut self, token: Option<String>) -> Self {
+        self.auth = token;
+        self
     }
 }
 

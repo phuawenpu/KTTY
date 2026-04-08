@@ -16,6 +16,8 @@ type Tx = mpsc::UnboundedSender<Message>;
 struct Peer {
     id: u64,
     tx: Tx,
+    last_activity: tokio::time::Instant,
+    auth_token: String,
 }
 
 struct Room {
@@ -31,11 +33,22 @@ impl Room {
         }
     }
 
-    fn add_peer(&mut self, tx: Tx) -> u64 {
+    fn add_peer(&mut self, tx: Tx) -> (u64, String) {
         let id = self.next_id;
         self.next_id += 1;
-        self.peers.push(Peer { id, tx });
-        id
+        // Generate a simple auth token from id + timestamp (real security is in ML-KEM layer)
+        let now_nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let auth_token = format!("{:016x}{:032x}", id, now_nanos);
+        self.peers.push(Peer {
+            id,
+            tx,
+            last_activity: tokio::time::Instant::now(),
+            auth_token: auth_token.clone(),
+        });
+        (id, auth_token)
     }
 }
 
@@ -51,24 +64,43 @@ async fn main() {
     let rooms: RoomMap = Arc::new(Mutex::new(HashMap::new()));
 
     let rooms_health = rooms.clone();
+    let rooms_cleanup = rooms.clone();
 
     let app = Router::new()
         .route("/ws", get(ws_handler))
         .route("/health", get(move || health_handler(rooms_health.clone())))
         .with_state(rooms);
 
-    let addr = format!("0.0.0.0:{port}");
-    println!("KTTY Relay listening on ws://{addr}/ws");
-
-    // Spawn periodic stale room cleanup
-    let rooms_cleanup = app.clone();
+    // Background task: evict stale peers every 30s
     tokio::spawn(async move {
-        let _ = rooms_cleanup; // keep reference
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
         loop {
-            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-            eprintln!("[relay] Periodic health check running");
+            interval.tick().await;
+            let mut map = rooms_cleanup.lock().await;
+            let now = tokio::time::Instant::now();
+            let mut empty_rooms = Vec::new();
+            for (room_id, room) in map.iter_mut() {
+                room.peers.retain(|p| {
+                    let alive = now.duration_since(p.last_activity).as_secs() < 60
+                        && p.tx.send(Message::Ping(vec![].into())).is_ok();
+                    if !alive {
+                        eprintln!("[relay] Evicting stale peer {} in room", p.id);
+                    }
+                    alive
+                });
+                if room.peers.is_empty() {
+                    empty_rooms.push(room_id.clone());
+                }
+            }
+            for room_id in empty_rooms {
+                map.remove(&room_id);
+                eprintln!("[relay] Removed empty room");
+            }
         }
     });
+
+    let addr = format!("0.0.0.0:{port}");
+    println!("KTTY Relay listening on ws://{addr}/ws");
 
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
@@ -123,9 +155,11 @@ async fn handle_socket(socket: WebSocket, rooms: RoomMap) {
 
     // Create channel for this peer
     let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
+    let tx_auth = tx.clone();
 
-    // Register in room and get our peer ID
+    // Register in room and get our peer ID + auth token
     let peer_id;
+    let auth_token;
     let peer_count;
     {
         let mut map = rooms.lock().await;
@@ -140,10 +174,19 @@ async fn handle_socket(socket: WebSocket, rooms: RoomMap) {
             room.peers.remove(0);
         }
 
-        peer_id = room.add_peer(tx);
+        let (id, token) = room.add_peer(tx);
+        peer_id = id;
+        auth_token = token;
         peer_count = room.peers.len();
     }
     eprintln!("[relay] Peer {} joined (now {} in room)", peer_id, peer_count);
+
+    // Send auth token back to the joining peer
+    {
+        let auth_msg = serde_json::json!({"type": "auth", "token": &auth_token});
+        let auth_text = Message::Text(serde_json::to_string(&auth_msg).unwrap().into());
+        let _ = tx_auth.send(auth_text);
+    }
 
     // Notify existing peers that a new client joined by forwarding the join message
     {
@@ -185,23 +228,15 @@ async fn handle_socket(socket: WebSocket, rooms: RoomMap) {
         }
     });
 
-    // Read from WebSocket, forward to the OTHER peer in the room
+    // Read from WebSocket, forward to the OTHER peer in the room.
+    // No idle timeout — peers stay connected as long as WebSocket is alive.
+    // The relay's periodic pings (above) keep the TCP connection alive and
+    // detect dead peers at the transport level.
     let rooms_read = rooms.clone();
     let room_id_read = room_id.clone();
 
     loop {
-        let read_timeout = tokio::time::sleep(std::time::Duration::from_secs(30));
-        tokio::pin!(read_timeout);
-
-        let msg = tokio::select! {
-            msg = ws_rx.next() => msg,
-            _ = &mut read_timeout => {
-                eprintln!("[relay] Peer {} timed out (30s idle)", peer_id);
-                break;
-            }
-        };
-
-        let msg = match msg {
+        let msg = match ws_rx.next().await {
             Some(Ok(m)) => m,
             _ => {
                 eprintln!("[relay] Peer {} stream ended", peer_id);
@@ -218,25 +253,76 @@ async fn handle_socket(socket: WebSocket, rooms: RoomMap) {
             _ => {}
         }
 
-        let map = rooms_read.lock().await;
-        if let Some(room) = map.get(&room_id_read) {
-            let targets = room.peers.iter().filter(|p| p.id != peer_id).count();
-            eprintln!("[relay] Peer {} -> forwarding to {} peer(s)", peer_id, targets);
+        // For text messages, validate auth token
+        if let Message::Text(ref text) = msg {
+            let text_str = text.to_string();
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&text_str) {
+                // Join/action and handshake messages don't require auth
+                let is_exempt = val.get("action").is_some()
+                    || val.get("type").and_then(|v| v.as_str()) == Some("handshake")
+                    || val.get("type").and_then(|v| v.as_str()) == Some("boot");
+                if !is_exempt {
+                    let msg_auth = val.get("auth").and_then(|v| v.as_str()).unwrap_or("");
+                    let map = rooms_read.lock().await;
+                    if let Some(room) = map.get(&room_id_read) {
+                        if let Some(peer) = room.peers.iter().find(|p| p.id == peer_id) {
+                            if peer.auth_token != msg_auth {
+                                eprintln!("[relay] Auth token mismatch from peer {}, dropping", peer_id);
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Update last_activity and forward to other peers
+        let mut map = rooms_read.lock().await;
+        if let Some(room) = map.get_mut(&room_id_read) {
+            // Update sender's activity
+            if let Some(peer) = room.peers.iter_mut().find(|p| p.id == peer_id) {
+                peer.last_activity = tokio::time::Instant::now();
+            }
+            // Forward to other peers (strip auth field before forwarding)
+            let forward_msg = if let Message::Text(ref text) = msg {
+                let text_str = text.to_string();
+                if let Ok(mut val) = serde_json::from_str::<serde_json::Value>(&text_str) {
+                    if val.get("auth").is_some() {
+                        val.as_object_mut().unwrap().remove("auth");
+                        Message::Text(serde_json::to_string(&val).unwrap().into())
+                    } else {
+                        msg.clone()
+                    }
+                } else {
+                    msg.clone()
+                }
+            } else {
+                msg.clone()
+            };
             for peer in &room.peers {
                 if peer.id != peer_id {
-                    let _ = peer.tx.send(msg.clone());
+                    let _ = peer.tx.send(forward_msg.clone());
                 }
             }
         }
     }
 
-    // Cleanup: remove this peer from the room
-    eprintln!("[relay] Peer {} read loop exited, cleaning up", peer_id);
+    // Cleanup: remove this peer and notify remaining peers
+    eprintln!("[relay] Peer {} disconnected, cleaning up", peer_id);
     write_task.abort();
     {
         let mut map = rooms.lock().await;
         if let Some(room) = map.get_mut(&room_id) {
             room.peers.retain(|p| p.id != peer_id);
+
+            // Notify remaining peers that this peer disconnected
+            let disconnect_msg = serde_json::json!({"type": "peer_disconnect", "peer_id": peer_id});
+            let disconnect_text = Message::Text(serde_json::to_string(&disconnect_msg).unwrap().into());
+            for peer in &room.peers {
+                let _ = peer.tx.send(disconnect_text.clone());
+                eprintln!("[relay] Notified peer {} of disconnect", peer.id);
+            }
+
             eprintln!("[relay] Room now has {} peer(s)", room.peers.len());
             if room.peers.is_empty() {
                 map.remove(&room_id);

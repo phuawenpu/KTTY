@@ -28,12 +28,13 @@ class TerminalScreen extends StatefulWidget {
 }
 
 class _TerminalScreenState extends State<TerminalScreen> {
+  final _terminalKey = GlobalKey<TerminalContainerState>();
+  double _displayFontSize = 14.0;
+
   @override
   void initState() {
     super.initState();
     SystemChannels.textInput.invokeMethod('TextInput.hide');
-    // After first layout, ensure PTY has the correct terminal size.
-    // This catches the case where onResize didn't fire (e.g. size matched default 80x24).
     SchedulerBinding.instance.addPostFrameCallback((_) {
       final t = widget.terminalService.terminal;
       if (t.viewWidth > 0 && t.viewHeight > 0) {
@@ -48,12 +49,9 @@ class _TerminalScreenState extends State<TerminalScreen> {
   }
 
   void _disconnect() {
-    // Only close the connection — do NOT kill the remote shell
     widget.terminalService.detach();
     widget.wsService.disconnect();
     context.read<SessionState>().setStatus(ConnectionStatus.disconnected);
-
-    // Navigate back to dashboard
     Navigator.pushReplacementNamed(context, '/dashboard');
   }
 
@@ -91,7 +89,8 @@ class _TerminalScreenState extends State<TerminalScreen> {
     final status = context.watch<SessionState>().status;
     final vs = context.watch<ViewportState>();
     final isPortrait = vs.mode == ViewportMode.portrait;
-    final keyboardDisabled = status != ConnectionStatus.connected && status != ConnectionStatus.syncing;
+    final keyboardDisabled = status != ConnectionStatus.connected &&
+        status != ConnectionStatus.syncing;
 
     return SafeArea(
       child: Scaffold(
@@ -103,12 +102,33 @@ class _TerminalScreenState extends State<TerminalScreen> {
               Image.asset('assets/ktty_logo.png', height: 22),
               const SizedBox(width: 6),
               const Text('KTTY'),
+              const SizedBox(width: 8),
+              // Connection status immediately after KTTY
+              const ConnectionIndicator(),
             ],
           ),
           backgroundColor: const Color(0xFF16213E),
           toolbarHeight: 32,
           titleTextStyle: const TextStyle(fontSize: 17),
           actions: [
+            // Font size controls
+            _buildHeaderButton(Icons.remove, () {
+              _terminalKey.currentState?.zoomOut();
+            }),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 2),
+              child: Text(
+                '${_displayFontSize.round()}',
+                style: const TextStyle(
+                  color: Colors.white38,
+                  fontSize: 10,
+                ),
+              ),
+            ),
+            _buildHeaderButton(Icons.add, () {
+              _terminalKey.currentState?.zoomIn();
+            }),
+            const SizedBox(width: 6),
             // Disconnect button
             IconButton(
               icon: const Icon(Icons.exit_to_app, size: 18),
@@ -129,11 +149,7 @@ class _TerminalScreenState extends State<TerminalScreen> {
               padding: EdgeInsets.zero,
               constraints: const BoxConstraints(),
             ),
-            const SizedBox(width: 8),
-            const Padding(
-              padding: EdgeInsets.only(right: 12),
-              child: ConnectionIndicator(),
-            ),
+            const SizedBox(width: 12),
           ],
         ),
         body: isPortrait
@@ -142,8 +158,15 @@ class _TerminalScreenState extends State<TerminalScreen> {
                   Expanded(
                     flex: kPortraitTerminalFlex,
                     child: TerminalContainer(
+                      key: _terminalKey,
                       terminal: widget.terminalService.terminal,
                       controller: widget.terminalService.controller,
+                      onFontSizeChanged: (size) {
+                        setState(() => _displayFontSize = size);
+                      },
+                      onWordTapped: (word) {
+                        widget.terminalService.terminal.textInput(word);
+                      },
                     ),
                   ),
                   Expanded(
@@ -163,10 +186,32 @@ class _TerminalScreenState extends State<TerminalScreen> {
             : Padding(
                 padding: const EdgeInsets.all(4),
                 child: TerminalContainer(
+                  key: _terminalKey,
                   terminal: widget.terminalService.terminal,
                   controller: widget.terminalService.controller,
+                  onFontSizeChanged: (size) {
+                    setState(() => _displayFontSize = size);
+                  },
+                  onWordTapped: (word) {
+                    widget.terminalService.terminal.textInput(word);
+                  },
                 ),
               ),
+      ),
+    );
+  }
+
+  Widget _buildHeaderButton(IconData icon, VoidCallback onTap) {
+    return Material(
+      color: const Color(0xFF2A2A4A).withValues(alpha: 0.8),
+      borderRadius: BorderRadius.circular(4),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(4),
+        child: Padding(
+          padding: const EdgeInsets.all(4),
+          child: Icon(icon, color: Colors.white54, size: 14),
+        ),
       ),
     );
   }

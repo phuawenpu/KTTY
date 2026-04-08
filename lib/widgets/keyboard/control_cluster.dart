@@ -39,7 +39,7 @@ class ControlCluster extends StatelessWidget {
               label,
               style: TextStyle(
                 color: active ? Colors.blueAccent : Colors.white70,
-                fontSize: 13,
+                fontSize: 13.8,
                 fontWeight: FontWeight.w600,
               ),
             ),
@@ -68,7 +68,7 @@ class ControlCluster extends StatelessWidget {
               label,
               style: const TextStyle(
                 color: Colors.white70,
-                fontSize: 13,
+                fontSize: 13.8,
                 fontWeight: FontWeight.w600,
               ),
             ),
@@ -93,7 +93,7 @@ class ControlCluster extends StatelessWidget {
             ),
           ),
           child: Center(
-            child: Icon(icon, color: Colors.white70, size: 15),
+            child: Icon(icon, color: Colors.white70, size: 15.9),
           ),
         ),
       ),

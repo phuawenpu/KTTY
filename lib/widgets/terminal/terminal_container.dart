@@ -1,49 +1,122 @@
-import 'dart:math';
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:xterm/xterm.dart';
 import '../../state/viewport_state.dart';
+import 'selection_handles.dart';
 
 class TerminalContainer extends StatefulWidget {
   final Terminal terminal;
   final TerminalController? controller;
+  final ValueChanged<double>? onFontSizeChanged;
+  final ValueChanged<String>? onWordTapped;
 
-  const TerminalContainer({super.key, required this.terminal, this.controller});
+  const TerminalContainer({
+    super.key,
+    required this.terminal,
+    this.controller,
+    this.onFontSizeChanged,
+    this.onWordTapped,
+  });
 
   @override
-  State<TerminalContainer> createState() => _TerminalContainerState();
+  State<TerminalContainer> createState() => TerminalContainerState();
 }
 
-class _TerminalContainerState extends State<TerminalContainer> {
-  double? _fontSizeOverride;
+class TerminalContainerState extends State<TerminalContainer> {
+  double _fontSize = _defaultFontSize;
   bool _autoSized = false;
+  double _pinchBaseFontSize = _defaultFontSize;
+  int _pointerCount = 0;
+  DateTime? _lastTapTime;
+  CellOffset? _lastTapCell;
 
   static const double _minFontSize = 6.0;
   static const double _maxFontSize = 24.0;
-  static const double _fontStep = 1.0;
   static const double _defaultFontSize = 14.0;
-  // Approximate ratio: monospace char width ≈ 0.6 * fontSize
   static const double _charWidthRatio = 0.6;
   static const int _targetMinCols = 80;
 
+  double get fontSize => _fontSize;
+
   double _autoFontSize(double availableWidth) {
-    // Calculate font size that fits _targetMinCols in the available width.
     final ideal = availableWidth / (_targetMinCols * _charWidthRatio);
     return ideal.clamp(_minFontSize, _maxFontSize);
   }
 
-  void _zoomIn() {
+  void zoomIn() {
     setState(() {
-      _fontSizeOverride = ((_fontSizeOverride ?? _defaultFontSize) + _fontStep)
-          .clamp(_minFontSize, _maxFontSize);
+      _fontSize = (_fontSize + 1.0).clamp(_minFontSize, _maxFontSize);
     });
+    widget.onFontSizeChanged?.call(_fontSize);
   }
 
-  void _zoomOut() {
+  void zoomOut() {
     setState(() {
-      _fontSizeOverride = ((_fontSizeOverride ?? _defaultFontSize) - _fontStep)
-          .clamp(_minFontSize, _maxFontSize);
+      _fontSize = (_fontSize - 1.0).clamp(_minFontSize, _maxFontSize);
     });
+    widget.onFontSizeChanged?.call(_fontSize);
+  }
+
+  /// Extract word at given cell offset from terminal buffer.
+  String? _wordAtCell(CellOffset cell) {
+    final buffer = widget.terminal.buffer;
+    final absRow = buffer.height - buffer.viewHeight + cell.y;
+    if (absRow < 0 || absRow >= buffer.height) return null;
+
+    final line = buffer.lines[absRow];
+    final lineText = line.toString();
+    if (lineText.isEmpty || cell.x >= lineText.length) return null;
+
+    // Find word boundaries (whitespace-delimited)
+    int start = cell.x;
+    int end = cell.x;
+    while (start > 0 && lineText[start - 1] != ' ') {
+      start--;
+    }
+    while (end < lineText.length && lineText[end] != ' ') {
+      end++;
+    }
+
+    final word = lineText.substring(start, end).trim();
+    return word.isNotEmpty ? word : null;
+  }
+
+  void _handleTapUp(TapUpDetails details, CellOffset cell) {
+    final now = DateTime.now();
+    final isDoubleTap = _lastTapTime != null &&
+        _lastTapCell != null &&
+        now.difference(_lastTapTime!).inMilliseconds < 400 &&
+        (cell.x - _lastTapCell!.x).abs() <= 2 &&
+        cell.y == _lastTapCell!.y;
+
+    if (isDoubleTap) {
+      _lastTapTime = null;
+      _lastTapCell = null;
+      // xterm's internal double-tap handler fires selectWord synchronously
+      // before our onTapUp. Read the selection after a microtask to ensure
+      // xterm has processed the double-tap.
+      Future.microtask(() {
+        final selection = widget.controller?.selection;
+        if (selection != null) {
+          final word = widget.terminal.buffer.getText(selection).trim();
+          if (word.isNotEmpty) {
+            print('[KTTY] Double-tap captured word: "$word"');
+            widget.onWordTapped?.call(word);
+          }
+        } else {
+          // Fallback: extract word from buffer directly
+          final word = _wordAtCell(cell);
+          if (word != null) {
+            print('[KTTY] Double-tap captured word (fallback): "$word"');
+            widget.onWordTapped?.call(word);
+          }
+        }
+      });
+    } else {
+      _lastTapTime = now;
+      _lastTapCell = cell;
+    }
   }
 
   @override
@@ -52,54 +125,61 @@ class _TerminalContainerState extends State<TerminalContainer> {
 
     return Stack(
       children: [
-        // Terminal view — auto-sizes font to fit 80 columns on first layout.
         Container(
           color: Colors.black,
           child: LayoutBuilder(
             builder: (context, constraints) {
-              // Auto-size font on first layout to fit 80 cols.
-              if (!_autoSized && _fontSizeOverride == null) {
+              if (!_autoSized) {
                 _autoSized = true;
-                _fontSizeOverride = _autoFontSize(constraints.maxWidth);
+                _fontSize = _autoFontSize(constraints.maxWidth);
+                WidgetsBinding.instance.addPostFrameCallback((_) {
+                  widget.onFontSizeChanged?.call(_fontSize);
+                });
               }
-              final fontSize = _fontSizeOverride ?? _defaultFontSize;
-              return TerminalView(
-                widget.terminal,
-                controller: widget.controller,
-                readOnly: false,
-                hardwareKeyboardOnly: true,
-                autofocus: false,
-                autoResize: true,
-                textStyle: TerminalStyle(
-                  fontSize: fontSize,
-                  fontFamily: 'monospace',
+              return Listener(
+                onPointerDown: (_) => _pointerCount++,
+                onPointerUp: (_) => _pointerCount--,
+                onPointerCancel: (_) => _pointerCount--,
+                child: GestureDetector(
+                  onScaleStart: (_) {
+                    if (_pointerCount >= 2) {
+                      _pinchBaseFontSize = _fontSize;
+                    }
+                  },
+                  onScaleUpdate: (details) {
+                    if (_pointerCount < 2) return;
+                    setState(() {
+                      _fontSize = (_pinchBaseFontSize * details.scale)
+                          .clamp(_minFontSize, _maxFontSize);
+                    });
+                    widget.onFontSizeChanged?.call(_fontSize);
+                  },
+                  child: TerminalView(
+                    widget.terminal,
+                    controller: widget.controller,
+                    readOnly: false,
+                    hardwareKeyboardOnly: true,
+                    autofocus: false,
+                    autoResize: true,
+                    onTapUp: _handleTapUp,
+                    textStyle: TerminalStyle(
+                      fontSize: _fontSize,
+                      fontFamily: 'monospace',
+                    ),
+                  ),
                 ),
               );
             },
           ),
         ),
-        // Zoom controls — top right
-        Positioned(
-          top: 4,
-          right: 4,
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              _buildZoomButton(Icons.remove, _zoomOut),
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 4),
-                child: Text(
-                  '${(_fontSizeOverride ?? _defaultFontSize).round()}',
-                  style: const TextStyle(
-                    color: Colors.white38,
-                    fontSize: 10,
-                  ),
-                ),
-              ),
-              _buildZoomButton(Icons.add, _zoomIn),
-            ],
+        // Selection handles overlay
+        if (widget.controller != null)
+          SelectionHandlesOverlay(
+            terminal: widget.terminal,
+            controller: widget.controller!,
+            fontSize: _fontSize,
+            charWidthRatio: _charWidthRatio,
           ),
-        ),
         // Resize overlay
         if (isResizing)
           Container(
@@ -115,21 +195,6 @@ class _TerminalContainerState extends State<TerminalContainer> {
             ),
           ),
       ],
-    );
-  }
-
-  Widget _buildZoomButton(IconData icon, VoidCallback onTap) {
-    return Material(
-      color: const Color(0xFF2A2A4A).withValues(alpha: 0.8),
-      borderRadius: BorderRadius.circular(4),
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(4),
-        child: Padding(
-          padding: const EdgeInsets.all(4),
-          child: Icon(icon, color: Colors.white54, size: 14),
-        ),
-      ),
     );
   }
 }

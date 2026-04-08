@@ -68,8 +68,9 @@ const List<List<KeyDef>> kLayer0 = [
     KeyDef(label: 'N', value: 'n', swipeDownValue: '\x0E'),
     KeyDef(label: 'M', value: 'm', swipeDownValue: '\x0D'),
   ],
-  // Row 5: Space + Enter
+  // Row 5: Shift + Space + Enter
   [
+    KeyDef(label: '\u21E7', value: '\x00SHIFT', flex: 1.0),
     KeyDef(label: 'Space', value: ' ', flex: 4.0),
     KeyDef(label: 'Enter', value: '\r', flex: 2.0),
   ],

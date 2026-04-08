@@ -6,12 +6,12 @@ use ktty_common::constants::RING_BUFFER_SIZE;
 pub struct Packet {
     pub seq: u64,
     pub msg_type: String,
-    pub encrypted_payload: Vec<u8>,
+    pub payload: Vec<u8>,
 }
 
 impl Packet {
     fn byte_size(&self) -> usize {
-        self.msg_type.len() + self.encrypted_payload.len() + 16 // overhead
+        self.msg_type.len() + self.payload.len() + 16 // overhead
     }
 }
 
@@ -86,12 +86,12 @@ mod tests {
         rb.push(Packet {
             seq: 1,
             msg_type: "pty".into(),
-            encrypted_payload: vec![0; 100],
+            payload: vec![0; 100],
         });
         rb.push(Packet {
             seq: 2,
             msg_type: "pty".into(),
-            encrypted_payload: vec![0; 100],
+            payload: vec![0; 100],
         });
 
         let (pkts, dropped) = rb.packets_since(0);
@@ -106,7 +106,7 @@ mod tests {
             rb.push(Packet {
                 seq: i,
                 msg_type: "pty".into(),
-                encrypted_payload: vec![0; 10],
+                payload: vec![0; 10],
             });
         }
 
@@ -130,7 +130,7 @@ mod tests {
             rb.push(Packet {
                 seq: i,
                 msg_type: "pty".into(),
-                encrypted_payload: vec![0; 50],
+                payload: vec![0; 50],
             });
         }
 
@@ -153,7 +153,7 @@ mod tests {
         rb.push(Packet {
             seq: 1,
             msg_type: "pty".into(),
-            encrypted_payload: vec![0; 100],
+            payload: vec![0; 100],
         });
         rb.clear();
         assert!(rb.oldest_seq().is_none());

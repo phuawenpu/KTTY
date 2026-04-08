@@ -85,6 +85,18 @@ impl PtyHandle {
         }
     }
 
+    /// Reconstruct from a write handle (reader is gone, will clone a new one).
+    pub fn from_write_handle(wh: PtyWriteHandle) -> Self {
+        let reader = wh.master.try_clone_reader()
+            .expect("Failed to clone PTY reader on reconnect");
+        Self {
+            master: wh.master,
+            reader,
+            writer: wh.writer,
+            child: wh.child,
+        }
+    }
+
     /// Take the reader for use in a separate thread.
     pub fn take_reader(self) -> (Box<dyn Read + Send>, PtyWriteHandle) {
         (

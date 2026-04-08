@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'app.dart';
+import 'src/rust/frb_generated.dart';
 
-void main() {
+void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await RustLib.init();
 
   // Lock to portrait by default; landscape via manual toggle only
   SystemChrome.setPreferredOrientations([

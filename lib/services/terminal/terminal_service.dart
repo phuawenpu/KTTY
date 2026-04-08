@@ -14,6 +14,15 @@ class TerminalService {
   Timer? _resizeDebounce;
   bool _firstResize = true;
 
+  // Keystroke batching: buffer input and flush every 50ms
+  List<int> _inputBuffer = [];
+  Timer? _inputFlushTimer;
+  static const _inputFlushInterval = Duration(milliseconds: 50);
+
+  // Local echo prediction: track chars we echoed locally so we can
+  // suppress the duplicate when the server echoes them back.
+  final List<int> _predictedEcho = [];
+
   TerminalService(this._ws)
       : terminal = Terminal(maxLines: kTerminalMaxLines),
         controller = TerminalController();
@@ -28,9 +37,24 @@ class TerminalService {
   final _pendingTimestamps = <int, int>{};
 
   void attach() {
-    // Terminal output (user keystrokes) → WebSocket
+    // Terminal output (user keystrokes) → local echo + batched send
     terminal.onOutput = (data) {
-      _sendPty(utf8.encode(data));
+      final bytes = utf8.encode(data);
+
+      // Local echo: show printable characters immediately so the user
+      // doesn't wait for the server round-trip. Track what we echoed
+      // so we can suppress the duplicate when the server echoes back.
+      // Control characters are never locally echoed.
+      for (final b in bytes) {
+        if (b >= 0x20 && b <= 0x7E) {
+          terminal.write(String.fromCharCode(b));
+          _predictedEcho.add(b);
+        }
+      }
+
+      // Buffer keystrokes and flush every 50ms to reduce WS messages
+      _inputBuffer.addAll(bytes);
+      _inputFlushTimer ??= Timer(_inputFlushInterval, _flushInput);
     };
 
     // Forward terminal resize events to backend PTY.
@@ -55,6 +79,42 @@ class TerminalService {
     _wsSubscription = _ws.messages.listen((raw) {
       _handleMessage(raw);
     });
+  }
+
+  void _flushInput() {
+    _inputFlushTimer = null;
+    if (_inputBuffer.isEmpty) return;
+    final batch = _inputBuffer;
+    _inputBuffer = [];
+    _sendPty(batch);
+  }
+
+  /// Remove leading bytes from server response that match our local echo
+  /// predictions. On mismatch, clear predictions and return all bytes
+  /// so the terminal shows the real server output.
+  List<int> _stripPredictedEcho(List<int> incoming) {
+    if (_predictedEcho.isEmpty) return incoming;
+
+    int matched = 0;
+    for (int i = 0; i < incoming.length && matched < _predictedEcho.length; i++) {
+      if (incoming[i] == _predictedEcho[matched]) {
+        matched++;
+      } else {
+        // Mismatch — prediction was wrong (vim, stty -echo, etc.)
+        // Clear predictions and return everything unfiltered.
+        _predictedEcho.clear();
+        return incoming;
+      }
+    }
+
+    // Remove matched predictions
+    _predictedEcho.removeRange(0, matched);
+
+    // Return the unmatched tail (e.g. shell prompt after the echo)
+    if (matched < incoming.length) {
+      return incoming.sublist(matched);
+    }
+    return [];
   }
 
   Future<void> _sendPty(List<int> data) async {
@@ -112,7 +172,14 @@ class TerminalService {
           bytes = base64Decode(payload);
         }
 
-        terminal.write(utf8.decode(bytes, allowMalformed: true));
+        // Strip bytes that match local echo predictions to avoid
+        // double-display. If the server sends something we didn't
+        // predict, the prediction queue is cleared (mismatch = the
+        // remote app is doing something unexpected, so show everything).
+        final filtered = _stripPredictedEcho(bytes);
+        if (filtered.isNotEmpty) {
+          terminal.write(utf8.decode(filtered, allowMalformed: true));
+        }
 
         // Track sequence number and measure round-trip
         final seq = json['seq'] as int?;
@@ -189,6 +256,12 @@ class TerminalService {
     terminal.onOutput = null;
     terminal.onResize = null;
     _resizeDebounce?.cancel();
+    _inputFlushTimer?.cancel();
+    _inputFlushTimer = null;
+    if (_inputBuffer.isNotEmpty) {
+      _sendPty(_inputBuffer);
+      _inputBuffer = [];
+    }
     _wsSubscription?.cancel();
     _wsSubscription = null;
   }

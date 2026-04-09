@@ -41,6 +41,22 @@
     For more details:
     * https://docs.flutter.dev/platform-integration/web/initialization
   -->
+  <script type="module">
+    // Load WASM crypto before Flutter so it's available at startup
+    import init, * as crypto from './wasm/ktty_wasm_crypto.js';
+    async function loadCrypto() {
+      try {
+        await init();
+        window._kttyCrypto = crypto;
+        window._kttyCryptoReady = true;
+        console.log('[KTTY] WASM crypto loaded');
+      } catch (e) {
+        window._kttyCryptoReady = false;
+        console.error('[KTTY] WASM crypto failed:', e);
+      }
+    }
+    await loadCrypto();
+  </script>
   <script src="flutter_bootstrap.js" async></script>
 </body>
 </html>

@@ -811,6 +811,7 @@ dependencies = [
  "clap",
  "env_logger",
  "futures-util",
+ "hex",
  "ktty-common",
  "libc",
  "log",

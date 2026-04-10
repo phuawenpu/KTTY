@@ -1,13 +1,13 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
-import 'package:flutter/foundation.dart' show VoidCallback;
+import 'package:flutter/foundation.dart' show VoidCallback, kIsWeb;
 import 'package:web_socket_channel/web_socket_channel.dart';
-import 'package:web_socket_channel/io.dart';
 import '../../config/constants.dart';
 import '../crypto/pin_utils.dart';
+import 'ws_connect.dart' if (dart.library.js_interop) 'ws_connect_web.dart'
+    as ws_connect;
 import '../crypto/handshake_service.dart';
 import '../crypto/crypto_service.dart';
 
@@ -37,21 +37,7 @@ class WebSocketService {
     _lastUrl = url;
     _cleanupChannel();
 
-    final uri = Uri.parse(url);
-
-    // Use IOWebSocketChannel with cert override for IP-based WSS connections
-    if (uri.scheme == 'wss') {
-      final client = HttpClient()
-        ..badCertificateCallback = (cert, host, port) => true;
-      final ws = await WebSocket.connect(
-        url,
-        customClient: client,
-      );
-      _channel = IOWebSocketChannel(ws);
-    } else {
-      _channel = WebSocketChannel.connect(uri);
-      await _channel!.ready;
-    }
+    _channel = await ws_connect.connectWebSocket(url);
 
     _autoReconnectEnabled = true;
 

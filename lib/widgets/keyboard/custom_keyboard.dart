@@ -16,6 +16,7 @@ class CustomKeyboard extends StatefulWidget {
   final bool pinEntryMode;
   final VoidCallback? onMicPressed;
   final bool isListening;
+  final VoidCallback? onHideKeyboard;
 
   const CustomKeyboard({
     super.key,
@@ -27,6 +28,7 @@ class CustomKeyboard extends StatefulWidget {
     this.pinEntryMode = false,
     this.onMicPressed,
     this.isListening = false,
+    this.onHideKeyboard,
   });
 
   @override
@@ -390,6 +392,21 @@ class _CustomKeyboardState extends State<CustomKeyboard>
                 ),
               ),
             ),
+            // Hide keyboard button
+            if (widget.onHideKeyboard != null)
+              GestureDetector(
+                onTap: widget.onHideKeyboard,
+                child: Container(
+                  margin: const EdgeInsets.symmetric(horizontal: 4),
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 6, vertical: 4),
+                  child: const Icon(
+                    Icons.keyboard_hide,
+                    color: Colors.white38,
+                    size: 18,
+                  ),
+                ),
+              ),
             const Spacer(),
             // Backspace
             _buildToolbarButton(

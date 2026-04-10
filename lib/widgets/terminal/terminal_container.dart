@@ -10,6 +10,7 @@ class TerminalContainer extends StatefulWidget {
   final TerminalController? controller;
   final ValueChanged<double>? onFontSizeChanged;
   final ValueChanged<String>? onWordTapped;
+  final bool hardwareKeyboardOnly;
 
   const TerminalContainer({
     super.key,
@@ -17,6 +18,7 @@ class TerminalContainer extends StatefulWidget {
     this.controller,
     this.onFontSizeChanged,
     this.onWordTapped,
+    this.hardwareKeyboardOnly = true,
   });
 
   @override
@@ -158,13 +160,20 @@ class TerminalContainerState extends State<TerminalContainer> {
                     widget.terminal,
                     controller: widget.controller,
                     readOnly: false,
-                    hardwareKeyboardOnly: true,
+                    hardwareKeyboardOnly: widget.hardwareKeyboardOnly,
                     autofocus: false,
                     autoResize: true,
                     onTapUp: _handleTapUp,
                     textStyle: TerminalStyle(
                       fontSize: _fontSize,
-                      fontFamily: 'monospace',
+                      fontFamily: 'RobotoMono',
+                      fontFamilyFallback: const [
+                        'Roboto Mono',
+                        'Consolas',
+                        'Menlo',
+                        'Liberation Mono',
+                        'monospace',
+                      ],
                     ),
                   ),
                 ),

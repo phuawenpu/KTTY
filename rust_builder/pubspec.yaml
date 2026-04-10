@@ -1,0 +1,12 @@
+name: ktty_bridge
+description: Rust FFI bridge for KTTY (native platforms only)
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: ^3.7.0
+  flutter: ">=3.3.0"
+
+dependencies:
+  flutter:
+    sdk: flutter

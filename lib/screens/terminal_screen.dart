@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
@@ -37,10 +38,15 @@ class _TerminalScreenState extends State<TerminalScreen> {
   bool _speechAvailable = false;
   bool _isListening = false;
 
+  // PWA: collapsible built-in keyboard (default: shown)
+  bool _builtInKeyboardVisible = true;
+
   @override
   void initState() {
     super.initState();
-    SystemChannels.textInput.invokeMethod('TextInput.hide');
+    if (!kIsWeb) {
+      SystemChannels.textInput.invokeMethod('TextInput.hide');
+    }
     SchedulerBinding.instance.addPostFrameCallback((_) {
       final t = widget.terminalService.terminal;
       if (t.viewWidth > 0 && t.viewHeight > 0) {
@@ -48,7 +54,7 @@ class _TerminalScreenState extends State<TerminalScreen> {
         widget.terminalService.sendResize(t.viewWidth, t.viewHeight);
       }
     });
-    _initSpeech();
+    if (!kIsWeb) _initSpeech();
   }
 
   Future<void> _initSpeech() async {
@@ -68,10 +74,7 @@ class _TerminalScreenState extends State<TerminalScreen> {
   }
 
   void _toggleSpeech() {
-    if (!_speechAvailable) {
-      print('[KTTY] Speech not available');
-      return;
-    }
+    if (!_speechAvailable) return;
 
     if (_isListening) {
       _speech.stop();
@@ -83,7 +86,6 @@ class _TerminalScreenState extends State<TerminalScreen> {
           if (result.finalResult) {
             final text = result.recognizedWords;
             if (text.isNotEmpty) {
-              print('[KTTY] Speech result: "$text"');
               widget.terminalService.sendText(text);
             }
           }
@@ -134,6 +136,10 @@ class _TerminalScreenState extends State<TerminalScreen> {
     return widget.terminalService.getSelectedText();
   }
 
+  void _toggleBuiltInKeyboard() {
+    setState(() => _builtInKeyboardVisible = !_builtInKeyboardVisible);
+  }
+
   @override
   Widget build(BuildContext context) {
     final status = context.watch<SessionState>().status;
@@ -141,6 +147,9 @@ class _TerminalScreenState extends State<TerminalScreen> {
     final isPortrait = vs.mode == ViewportMode.portrait;
     final keyboardDisabled = status != ConnectionStatus.connected &&
         status != ConnectionStatus.syncing;
+
+    // Allow collapsing the built-in keyboard on both web and Android
+    final showBuiltInKeyboard = isPortrait && _builtInKeyboardVisible;
 
     return SafeArea(
       child: Scaffold(
@@ -153,7 +162,6 @@ class _TerminalScreenState extends State<TerminalScreen> {
               const SizedBox(width: 6),
               const Text('KTTY'),
               const SizedBox(width: 8),
-              // Connection status immediately after KTTY
               const ConnectionIndicator(),
             ],
           ),
@@ -179,6 +187,23 @@ class _TerminalScreenState extends State<TerminalScreen> {
               _terminalKey.currentState?.zoomIn();
             }),
             const SizedBox(width: 6),
+            // Toggle built-in keyboard
+            if (isPortrait)
+              IconButton(
+                icon: Icon(
+                  _builtInKeyboardVisible
+                      ? Icons.keyboard_hide
+                      : Icons.keyboard,
+                  size: 18,
+                ),
+                onPressed: _toggleBuiltInKeyboard,
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(),
+                tooltip: _builtInKeyboardVisible
+                    ? 'Hide keyboard'
+                    : 'Show keyboard',
+              ),
+            if (isPortrait) const SizedBox(width: 6),
             // Disconnect button
             IconButton(
               icon: const Icon(Icons.exit_to_app, size: 18),
@@ -202,7 +227,7 @@ class _TerminalScreenState extends State<TerminalScreen> {
             const SizedBox(width: 12),
           ],
         ),
-        body: isPortrait
+        body: showBuiltInKeyboard
             ? Column(
                 children: [
                   Expanded(
@@ -230,8 +255,9 @@ class _TerminalScreenState extends State<TerminalScreen> {
                         print('[KTTY] Pasting ${text.length} chars');
                         widget.terminalService.sendText(text);
                       },
-                      onMicPressed: _toggleSpeech,
+                      onMicPressed: kIsWeb ? null : _toggleSpeech,
                       isListening: _isListening,
+                      onHideKeyboard: _toggleBuiltInKeyboard,
                     ),
                   ),
                 ],
@@ -242,11 +268,12 @@ class _TerminalScreenState extends State<TerminalScreen> {
                   key: _terminalKey,
                   terminal: widget.terminalService.terminal,
                   controller: widget.terminalService.controller,
+                  hardwareKeyboardOnly: true,
                   onFontSizeChanged: (size) {
                     setState(() => _displayFontSize = size);
                   },
                   onWordTapped: (word) {
-                    widget.terminalService.terminal.textInput(word);
+                    widget.terminalService.sendText(word);
                   },
                 ),
               ),

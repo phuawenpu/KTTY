@@ -1,15 +1,20 @@
-import 'dart:io';
+import 'dart:convert';
+import 'dart:typed_data';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import '../config/constants.dart';
 import '../models/connection_state.dart';
+import '../services/crypto/native_crypto.dart';
 import '../services/websocket/websocket_service.dart';
 import '../services/terminal/terminal_service.dart';
 import '../state/session_state.dart';
 import '../state/keyboard_state.dart';
 import '../widgets/terminal/connection_indicator.dart';
 import '../widgets/keyboard/custom_keyboard.dart';
+import 'ping_native.dart' if (dart.library.js_interop) 'ping_web.dart'
+    as ping;
 
 class DashboardScreen extends StatefulWidget {
   final WebSocketService wsService;
@@ -31,52 +36,39 @@ class _DashboardScreenState extends State<DashboardScreen> {
   bool _connecting = false;
   bool _pinVisible = false;
 
-  // Track which field is focused
   final _urlFocusNode = FocusNode();
   final _pinFocusNode = FocusNode();
   TextEditingController? _activeController;
 
   bool _relayReachable = false;
 
+  // Rate limiting for PIN attempts (PWA only)
+  int _pinAttempts = 0;
+  DateTime? _lockoutUntil;
+  static const _maxAttempts = 5;
+  static const _lockoutDuration = Duration(seconds: 30);
+
   @override
   void initState() {
     super.initState();
-    SystemChannels.textInput.invokeMethod('TextInput.hide');
-
-    _urlFocusNode.addListener(_onUrlFocus);
+    if (!kIsWeb) {
+      SystemChannels.textInput.invokeMethod('TextInput.hide');
+      _urlFocusNode.addListener(_onUrlFocus);
+      _activeController = _urlController;
+      _pingRelay();
+    } else {
+      _activeController = _pinController;
+    }
     _pinFocusNode.addListener(_onPinFocus);
-
-    // Default focus to URL field
-    _activeController = _urlController;
-
-    // Auto-ping relay on startup
-    _pingRelay();
   }
 
   Future<void> _pingRelay() async {
     final url = _urlController.text.trim();
     if (url.isEmpty) return;
-
-    print('[KTTY] Ping: attempting connection to $url');
-
     try {
-      final httpUrl = url
-          .replaceFirst('wss://', 'https://')
-          .replaceFirst('ws://', 'http://')
-          .replaceFirst('/ws', '/');
-
-      final uri = Uri.parse(httpUrl);
-      final client = HttpClient();
-      client.connectionTimeout = const Duration(seconds: 5);
-      client.badCertificateCallback = (cert, host, port) => true;
-      final request = await client.getUrl(uri);
-      final response = await request.close().timeout(const Duration(seconds: 5));
-      await response.drain();
-
-      print('[KTTY] Ping: HTTP ${response.statusCode} from $httpUrl');
-      setState(() => _relayReachable = true);
-      if (mounted) context.read<SessionState>().setRelayReachable(true);
-      client.close();
+      final reachable = await ping.pingRelay(url);
+      setState(() => _relayReachable = reachable);
+      if (mounted) context.read<SessionState>().setRelayReachable(reachable);
     } catch (e) {
       print('[KTTY] Ping failed: $e');
       setState(() => _relayReachable = false);
@@ -87,7 +79,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   void _onUrlFocus() {
     if (_urlFocusNode.hasFocus) {
       setState(() => _activeController = _urlController);
-      context.read<KeyboardState>().setLayer(0); // ABC for URL
+      context.read<KeyboardState>().setLayer(0);
       SystemChannels.textInput.invokeMethod('TextInput.hide');
     }
   }
@@ -95,8 +87,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
   void _onPinFocus() {
     if (_pinFocusNode.hasFocus) {
       setState(() => _activeController = _pinController);
-      context.read<KeyboardState>().setLayer(1); // 123 for PIN
-      SystemChannels.textInput.invokeMethod('TextInput.hide');
+      context.read<KeyboardState>().setLayer(1);
+      if (!kIsWeb) SystemChannels.textInput.invokeMethod('TextInput.hide');
     }
   }
 
@@ -105,7 +97,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
     if (controller == null) return;
 
     if (value == '\x7F' || value == '\x1b[3~') {
-      // Backspace or Delete
       final text = controller.text;
       if (text.isNotEmpty) {
         final sel = controller.selection;
@@ -121,21 +112,20 @@ class _DashboardScreenState extends State<DashboardScreen> {
         }
       }
     } else if (value == '\r' || value == '\n') {
-      // Enter — move to next field or connect
-      if (_activeController == _urlController) {
+      if (!kIsWeb && _activeController == _urlController) {
         _pinFocusNode.requestFocus();
       } else {
         _connect();
       }
     } else if (value == '\t') {
-      // Tab — switch fields
-      if (_activeController == _urlController) {
-        _pinFocusNode.requestFocus();
-      } else {
-        _urlFocusNode.requestFocus();
+      if (!kIsWeb) {
+        if (_activeController == _urlController) {
+          _pinFocusNode.requestFocus();
+        } else {
+          _urlFocusNode.requestFocus();
+        }
       }
     } else if (value.codeUnitAt(0) >= 32) {
-      // Printable character — insert at cursor
       final text = controller.text;
       final sel = controller.selection;
       if (sel.isValid) {
@@ -152,13 +142,98 @@ class _DashboardScreenState extends State<DashboardScreen> {
     }
   }
 
+  bool get _isLockedOut {
+    if (_lockoutUntil == null) return false;
+    if (DateTime.now().isAfter(_lockoutUntil!)) {
+      _lockoutUntil = null;
+      _pinAttempts = 0;
+      return false;
+    }
+    return true;
+  }
+
+  int get _lockoutSecondsRemaining {
+    if (_lockoutUntil == null) return 0;
+    return _lockoutUntil!.difference(DateTime.now()).inSeconds.clamp(0, 999);
+  }
+
+  List<int> _hexDecode(String hex) {
+    hex = hex.replaceAll(RegExp(r'\s'), '');
+    final bytes = <int>[];
+    for (var i = 0; i + 1 < hex.length; i += 2) {
+      bytes.add(int.parse(hex.substring(i, i + 2), radix: 16));
+    }
+    return bytes;
+  }
+
   Future<void> _connect() async {
     final session = context.read<SessionState>();
-    final url = _urlController.text.trim();
-    // Strip to digits only
     final pin = _pinController.text.trim().replaceAll(RegExp(r'[^0-9]'), '');
+    if (pin.isEmpty) return;
 
-    if (url.isEmpty || pin.isEmpty) return;
+    // Rate limiting (PWA)
+    if (kIsWeb && _isLockedOut) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Too many attempts. Try again in ${_lockoutSecondsRemaining}s.'),
+            duration: const Duration(seconds: 3),
+          ),
+        );
+      }
+      return;
+    }
+
+    String url;
+    if (kIsWeb) {
+      // Decrypt embedded URL token using PIN
+      if (kEncryptedRelayUrl.isEmpty) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('No encrypted URL configured. Rebuild with --dart-define=ENCRYPTED_RELAY_URL=<hex>'),
+              duration: Duration(seconds: 4),
+            ),
+          );
+        }
+        return;
+      }
+      try {
+        final derivedKey = await NativeCrypto.deriveKey(pin);
+        final encBytes = _hexDecode(kEncryptedRelayUrl);
+        final decrypted = await NativeCrypto.decrypt(
+          Uint8List.fromList(derivedKey),
+          Uint8List.fromList(encBytes),
+        );
+        url = utf8.decode(decrypted);
+        if (!url.startsWith('ws://') && !url.startsWith('wss://')) {
+          throw Exception('Invalid URL after decryption');
+        }
+        _pinAttempts = 0;
+        _lockoutUntil = null;
+      } catch (e) {
+        _pinAttempts++;
+        if (_pinAttempts >= _maxAttempts) {
+          _lockoutUntil = DateTime.now().add(_lockoutDuration);
+        }
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                _pinAttempts >= _maxAttempts
+                    ? 'Too many failed attempts. Locked for ${_lockoutDuration.inSeconds}s.'
+                    : 'Wrong PIN. (${_maxAttempts - _pinAttempts} attempts remaining)',
+              ),
+              duration: const Duration(seconds: 3),
+            ),
+          );
+        }
+        return;
+      }
+    } else {
+      url = _urlController.text.trim();
+      if (url.isEmpty) return;
+    }
 
     setState(() => _connecting = true);
     session.setUrl(url);
@@ -166,10 +241,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
     session.setStatus(ConnectionStatus.connectingRelay);
 
     try {
-      print('[KTTY] Connect tapped. URL=$url PIN length=${pin.length}');
+      print('[KTTY] Connecting...');
 
       widget.wsService.onConnectionChanged = (connected) {
-        print('[KTTY] Connection state changed: $connected');
         if (connected) {
           session.setStatus(ConnectionStatus.connected);
         } else {
@@ -177,16 +251,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
         }
       };
 
-      print('[KTTY] Connecting to relay...');
       await widget.wsService.connect(url);
       session.setStatus(ConnectionStatus.relayConnected);
-      print('[KTTY] Relay connected. Starting handshake...');
 
       session.setStatus(ConnectionStatus.waitingForAgent);
       await widget.wsService.performHandshake(pin);
-      print('[KTTY] Agent found.');
 
-      // Clear any stale content from previous session before attaching
       widget.terminalService.terminal.write('\x1b[2J\x1b[H');
       widget.terminalService.attach();
       session.setStatus(ConnectionStatus.connected);
@@ -200,7 +270,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
       widget.wsService.disconnect();
       session.setStatus(ConnectionStatus.disconnected);
 
-      // Determine user-friendly error message
       String errorMsg;
       if (e.toString().contains('No agent found')) {
         errorMsg = 'No agent found. Wrong PIN or agent not running.';
@@ -223,7 +292,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
     } finally {
       if (mounted) {
         setState(() => _connecting = false);
-        // 5 second cooldown after failure to prevent rapid retries
         if (session.status == ConnectionStatus.disconnected) {
           setState(() => _connecting = true);
           await Future.delayed(const Duration(seconds: 5));
@@ -272,28 +340,19 @@ class _DashboardScreenState extends State<DashboardScreen> {
       ),
       body: Column(
         children: [
-          // Form area: 65%
           Expanded(
             flex: kPortraitTerminalFlex,
             child: Stack(
               children: [
-                // Logo towards top
                 Positioned(
                   top: 8,
                   left: 0,
                   right: 0,
                   child: Container(
                     color: const Color(0xFF101721),
-                    child: Opacity(
-                      opacity: 1.0,
-                      child: Image.asset(
-                        'assets/ktty_logo.png',
-                        height: 240,
-                      ),
-                    ),
+                    child: Image.asset('assets/ktty_logo.png', height: 240),
                   ),
                 ),
-                // Form content at the bottom
                 Positioned(
                   left: 0,
                   right: 0,
@@ -304,81 +363,84 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                  TextField(
-                    controller: _urlController,
-                    focusNode: _urlFocusNode,
-                    readOnly: true,
-                    showCursor: true,
-                    style: const TextStyle(color: Colors.white),
-                    decoration: InputDecoration(
-                      labelText: 'WebSocket URL',
-                      labelStyle: const TextStyle(color: Colors.white54),
-                      enabledBorder: OutlineInputBorder(
-                        borderSide: BorderSide(
-                          color: _activeController == _urlController
-                              ? Colors.blueAccent
-                              : Colors.white24,
-                        ),
-                      ),
-                      focusedBorder: const OutlineInputBorder(
-                        borderSide: BorderSide(color: Colors.blueAccent),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 10),
-                  TextField(
-                    controller: _pinController,
-                    focusNode: _pinFocusNode,
-                    readOnly: true,
-                    showCursor: true,
-                    obscureText: !_pinVisible,
-                    style: const TextStyle(color: Colors.white),
-                    decoration: InputDecoration(
-                      labelText: 'PIN',
-                      labelStyle: const TextStyle(color: Colors.white54),
-                      suffixIcon: IconButton(
-                        icon: Icon(
-                          _pinVisible ? Icons.visibility_off : Icons.visibility,
-                          color: Colors.white38,
-                          size: 20,
-                        ),
-                        onPressed: () => setState(() => _pinVisible = !_pinVisible),
-                      ),
-                      enabledBorder: OutlineInputBorder(
-                        borderSide: BorderSide(
-                          color: _activeController == _pinController
-                              ? Colors.blueAccent
-                              : Colors.white24,
-                        ),
-                      ),
-                      focusedBorder: const OutlineInputBorder(
-                        borderSide: BorderSide(color: Colors.blueAccent),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  ElevatedButton(
-                    onPressed: _connecting ? null : _connect,
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: const Color(0xFF0F3460),
-                      padding: const EdgeInsets.symmetric(vertical: 16),
-                    ),
-                    child: _connecting
-                        ? const CircularProgressIndicator(color: Colors.white)
-                        : const Text(
-                            'Connect',
-                            style:
-                                TextStyle(fontSize: 19, color: Colors.white),
+                        // Mobile only: plaintext URL field
+                        if (!kIsWeb) ...[
+                          TextField(
+                            controller: _urlController,
+                            focusNode: _urlFocusNode,
+                            readOnly: true,
+                            showCursor: true,
+                            style: const TextStyle(color: Colors.white),
+                            decoration: InputDecoration(
+                              labelText: 'WebSocket URL',
+                              labelStyle: const TextStyle(color: Colors.white54),
+                              enabledBorder: OutlineInputBorder(
+                                borderSide: BorderSide(
+                                  color: _activeController == _urlController
+                                      ? Colors.blueAccent
+                                      : Colors.white24,
+                                ),
+                              ),
+                              focusedBorder: const OutlineInputBorder(
+                                borderSide: BorderSide(color: Colors.blueAccent),
+                              ),
+                            ),
                           ),
+                          const SizedBox(height: 10),
+                        ],
+                        // PIN field (both platforms)
+                        TextField(
+                          controller: _pinController,
+                          focusNode: _pinFocusNode,
+                          readOnly: !kIsWeb,
+                          showCursor: true,
+                          obscureText: !_pinVisible,
+                          style: const TextStyle(color: Colors.white),
+                          decoration: InputDecoration(
+                            labelText: 'PIN',
+                            labelStyle: const TextStyle(color: Colors.white54),
+                            suffixIcon: IconButton(
+                              icon: Icon(
+                                _pinVisible ? Icons.visibility_off : Icons.visibility,
+                                color: Colors.white38,
+                                size: 20,
+                              ),
+                              onPressed: () => setState(() => _pinVisible = !_pinVisible),
+                            ),
+                            enabledBorder: OutlineInputBorder(
+                              borderSide: BorderSide(
+                                color: _activeController == _pinController
+                                    ? Colors.blueAccent
+                                    : Colors.white24,
+                              ),
+                            ),
+                            focusedBorder: const OutlineInputBorder(
+                              borderSide: BorderSide(color: Colors.blueAccent),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        ElevatedButton(
+                          onPressed: _connecting ? null : _connect,
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: const Color(0xFF0F3460),
+                            padding: const EdgeInsets.symmetric(vertical: 16),
+                          ),
+                          child: _connecting
+                              ? const CircularProgressIndicator(color: Colors.white)
+                              : const Text(
+                                  'Connect',
+                                  style: TextStyle(fontSize: 19, color: Colors.white),
+                                ),
+                        ),
+                      ],
+                    ),
                   ),
-                ],
-              ),
-            ),
-          ),
+                ),
               ],
             ),
           ),
-          // Keyboard: 35%
+          // Keyboard
           Expanded(
             flex: kPortraitKeyboardFlex,
             child: CustomKeyboard(

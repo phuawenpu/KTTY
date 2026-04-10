@@ -20,6 +20,11 @@ struct Cli {
     /// Initial terminal rows
     #[arg(long, default_value = "24")]
     rows: u16,
+
+    /// Generate an encrypted URL token for PWA use and exit.
+    /// The URL is encrypted with the PIN so only the correct PIN can decrypt it.
+    #[arg(long)]
+    encrypt_url: bool,
 }
 
 const VERSION: u32 = 7;
@@ -55,6 +60,18 @@ async fn main() -> anyhow::Result<()> {
     let derived_key = crypto::derive_key(&pin)?;
     let room_id = crypto::room_id(&derived_key);
     eprintln!("Room ID: {room_id}");
+
+    // --encrypt-url: generate encrypted URL token for PWA and exit
+    if cli.encrypt_url {
+        let url_bytes = cli.relay_url.as_bytes();
+        let encrypted = crypto::encrypt(&derived_key, url_bytes)?;
+        let hex_token = hex::encode(&encrypted);
+        eprintln!("\n=== Encrypted URL Token (for PWA) ===");
+        println!("{hex_token}");
+        eprintln!("=====================================");
+        eprintln!("Paste this token into the PWA 'Encrypted URL' field.");
+        std::process::exit(0);
+    }
 
     // Main loop: spawn PTY, connect, reconnect on disconnect
     // PTY persists across reconnects; only respawn if shell exits

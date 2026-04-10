@@ -1,5 +1,14 @@
 # KTTY — Secure Mobile Terminal Relay
 
+> **Repo:** https://github.com/phuawenpu/KTTY  ·  **Live relay:** `wss://ktty-relay.fly.dev/ws`  ·  **PWA:** `https://phuawenpu.github.io/KTTY/`
+>
+> This README is intentionally exhaustive. It is the **only** persistent
+> documentation for this project — everything you need to rebuild from a
+> clean checkout, understand every file, debug crypto failures, or pick up
+> the project cold months from now is in here. There is no separate wiki,
+> no Notion doc, no Slack history. If a fact about this project doesn't
+> live in the source tree or in this README, assume it doesn't exist.
+
 KTTY is a post-quantum-encrypted mobile terminal that lets you reach a Linux
 shell from your phone over an untrusted relay. The relay (running on Fly.io)
 forwards encrypted bytes between phone and host but cannot read or tamper with
@@ -521,6 +530,263 @@ each other.
 `lib/config/constants.dart` has `const int kAppVersion = 7;`
 
 Bump these together when you make a wire-protocol change.
+
+---
+
+## Development log — what happened, in order
+
+If you're picking this project up after a long break (or after another
+developer), this section is the orientation manual. It explains the state
+of the source tree by walking through the changes that produced it. Read
+this **before** you start editing.
+
+### Phase 1 — initial Flutter + Rust scaffold (commits up to `cda8cd9ad`)
+
+The first commits stand up a working three-process system: Flutter app
+talks to a Rust agent through a Rust relay deployed on Fly. The Rust crypto
+crate (`backend/common`) was added with `ml-kem = "0.2"` from day one. The
+agent has always used FIPS 203 ML-KEM. The Flutter side used
+`package:pqcrypto` for ML-KEM and `package:cryptography` for everything
+else.
+
+This *seemed* to work in early testing because the developer was running
+the agent and the Flutter client without an HMAC verification step on
+every handshake — early commits skipped the HMAC check. Once the HMAC
+step was wired in (commit `7e8b0b59c` "Connection reliability overhaul,
+terminal UX, ML-KEM interop test"), the developer immediately discovered
+the pqcrypto-vs-ml-kem mismatch via the standalone interop test in
+`tests/mlkem_interop/`. The interop test's diagnostic output explicitly
+recommended switching to FFI bindings to the Rust crate.
+
+Commit `7e8b0b59c` refactored the Flutter side to call `NativeCrypto`
+through a `native_crypto.dart` dispatcher — but the actual native
+implementation file (`native_crypto_ffi.dart`) was never committed. The
+developer's local working tree had a hand-generated bridge that called
+into a Rust cdylib, but it was untracked and lost when the workspace
+was cleaned.
+
+### Phase 2 — Web/PWA support and the broken pqcrypto detour (commits `1ad6ec7fb` → `eabe6c7df`)
+
+The developer added Flutter web/PWA support. To unblock both targets at
+once, they wrote stub `native_crypto_ffi.dart` (throws "FFI not
+available") and `native_crypto_web.dart` (calls `window._kttyCrypto.*`
+from a yet-to-be-built WASM module), plus a stub `frb_generated.dart`
+that imitates `flutter_rust_bridge`.
+
+A few commits later (`7b56a5de7` "Pure Dart crypto for Android, simplify
+PWA auth") the developer replaced the stub `native_crypto_ffi.dart` with
+a *pure-Dart* implementation that called `package:pqcrypto`'s ML-KEM
+directly. This compiled, the APK ran, the dashboard rendered, the user
+could connect to the relay — but every handshake failed at HMAC
+verification with "possible MITM attack". The shared secrets produced by
+Dart pqcrypto (CRYSTALS-Kyber draft) and Rust ml-kem (FIPS 203) were
+mathematically different, exactly as the interop test had warned.
+
+### Phase 3 — restore Rust ML-KEM, this time for real (commit `e39f16d71`)
+
+The fix:
+
+1. Added `mlkem_encapsulate` to `backend/common/src/crypto.rs` so the
+   agent and the Flutter side can both call it. Wrote a roundtrip test
+   that pairs `mlkem_encapsulate` against the agent's `decapsulate` path.
+2. Created **`backend/ffi-crypto/`** as a `cdylib` exposing one C ABI
+   function `ktty_mlkem_encapsulate(ek*, ct_out*, ss_out*) -> i32`.
+   Fixed-size buffers (1184 / 1088 / 32) so there's no Rust-allocated
+   memory crossing the FFI boundary.
+3. Created **`backend/wasm-crypto/`** as a `wasm-bindgen` crate that
+   exposes all seven crypto functions on `window._kttyCrypto.*` for the
+   PWA. Excluded from the main workspace (different target, different
+   dep set).
+4. Rewrote `lib/services/crypto/native_crypto_ffi.dart` so
+   `mlkemEncapsulate` calls into `libktty_ffi_crypto.so` via `dart:ffi`.
+   The rest of the file (Argon2id / XChaCha20 / HMAC) stayed in pure
+   Dart via `package:cryptography` — those are standardized algorithms
+   with no draft variants.
+5. Wrote **`build-crypto.sh`** that runs `cargo ndk` for all four
+   Android ABIs and `wasm-pack build` for the PWA, dropping outputs
+   into `android/app/src/main/jniLibs/<abi>/` and `web/wasm/`
+   respectively.
+6. Removed the now-obsolete `flutter_rust_bridge`, `ktty_bridge`, and
+   `pqcrypto` dependencies from `pubspec.yaml`. Deleted the
+   `lib/src/rust/`, `rust_builder/`, and `rust/` directories.
+7. **Committed the pre-built `.so` and `.wasm` artifacts** so a fresh
+   checkout can build the APK and PWA without needing the Rust toolchain
+   installed.
+8. Verified end-to-end with `cargo test -p ktty-common` (the ML-KEM
+   roundtrip test passes).
+
+### Phase 4 — security audit and hardening (commit `8715ffe42`)
+
+The repo went public. An immediate security audit (driven by Claude)
+found five real issues. All fixed in commit `8715ffe42`:
+
+1. **Forgeable relay auth token + auth-check exemptions for
+   `handshake`/`boot`/`action`** → CSPRNG token via `OsRng`,
+   constant-time compare via `subtle`, no exempt message types other
+   than the very first `join`. Both agent and Flutter now attach the
+   relay-issued auth token to handshake messages.
+2. **Trivial relay DoS** (unbounded mpsc, no WS frame size cap, no
+   per-message length check) → bounded `mpsc::channel(64)`,
+   `WebSocketUpgrade::max_frame_size(64 KB).max_message_size(256 KB)`,
+   oversized frames rejected before parsing. `/health` endpoint
+   stripped to `{"status":"ok"}`.
+3. **Agent printed PIN to stderr** → digit count only.
+4. **Cleartext WebSocket allowed on Android + Flutter accepted `ws://`**
+   → manifest set `usesCleartextTraffic="false"`, dashboard rejects any
+   URL not starting with `wss://`. Minimum PIN length 8 enforced on
+   both ends to make offline cracking of the room id infeasible.
+5. **PWA had no CSP and `window._kttyCrypto` was a wide-open hot-swap
+   target** → strict CSP `<meta>` tag, `Object.freeze` on the global,
+   `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`.
+
+Plus build hardening: `build-crypto.sh` sets `RUSTFLAGS=--remap-path-prefix=...`
+so committed `.so`/`.wasm` artifacts no longer leak the developer's home
+directory. `.gitignore` defensively blocks common secret filenames so a
+future `git add -A` can't accidentally publish a `.env` or keystore.
+
+### Phase 5 — picking up where this left off
+
+Future work is in the [Outstanding work](#outstanding-work--known-limitations)
+section below. The two big-ticket items are an HKDF-based key separation
+(audit M2, requires a coordinated v3 wire-format bump) and per-IP
+connection limits on the relay (audit L4).
+
+---
+
+## Build environment expectations
+
+This repo was developed on a Fedora 43 host with the following layout
+(none of these paths are baked into the repo — they're just where the
+developer happened to install things):
+
+| Tool | Where it lived | Notes |
+|---|---|---|
+| Flutter SDK | `flutter/` inside the repo (gitignored) | Stable channel, Dart 3.11+. You can use a system-installed Flutter; the vendored copy is just convenience. |
+| Rust toolchain | `~/.rustup/toolchains/stable-x86_64-unknown-linux-gnu` | Installed via `rustup`. Rust 1.85+ is required for edition 2024. |
+| Android NDK | `~/Android/Sdk/ndk/28.2.13676358` | Installed via Android Studio's SDK Manager. Set `$ANDROID_NDK_HOME` to this when running `build-crypto.sh`. |
+| `cargo-ndk`, `wasm-pack` | `~/.cargo/bin/` (or this repo's `.cargo/bin/`) | Both are `cargo install`-able. |
+| Android SDK + build-tools | `~/Android/Sdk/` | Needed for the actual `flutter build apk` step. Not needed for `build-crypto.sh`. |
+
+The developer originally had **no Rust toolchain on the host machine**
+when this project started — the Rust agent and relay were built inside a
+Docker container (see `backend/Dockerfile`). The pre-built `ktty-agent`
+binary was then copied out via `build-agent.sh`. After the security work
+in Phases 3 and 4, the developer installed Rust on the host and now
+builds everything locally. Either approach works — what matters is that
+the binary on disk in `backend/target/release/ktty-agent` matches the
+source tree.
+
+### Pushing to GitHub
+
+This repo lives at `https://github.com/phuawenpu/KTTY.git`. There's no
+SSH key configured on the dev machine — pushes go over HTTPS. The
+recommended setup:
+
+```bash
+gh auth login   # one-time, sets up a credential helper
+git push origin main
+```
+
+If you don't have `gh` and just have a Personal Access Token, the
+one-shot way to push without configuring a credential helper is:
+
+```bash
+git push https://USERNAME:TOKEN@github.com/phuawenpu/KTTY.git main
+```
+
+Be aware that the token ends up in your shell history. Rotate it
+afterwards or use a credential helper instead.
+
+---
+
+## Outstanding work / known limitations
+
+The 2026-04-10 audit flagged a number of additional issues that are
+**not** fixed in the current commit. They were deferred either because
+they require a coordinated wire-protocol bump (so the agent and client
+have to be redeployed in lockstep) or because they're performance work
+rather than security boundaries. Tackle them in a future v3 commit:
+
+### Wants a coordinated v3 wire-format bump
+
+- **HKDF-based key separation (audit M2).** Today the same Argon2id-derived
+  32-byte key is used as the room id (visible to the relay), the
+  XChaCha20-Poly1305 encryption key, *and* the HMAC-SHA256 key for the
+  ML-KEM verification step. Textbook key-separation violation. Not
+  exploitable on its own — HMAC-SHA256 and XChaCha20 are independent
+  primitives — but it means cracking the PIN reveals the encryption key
+  directly. **Fix:** derive three subkeys with HKDF-SHA256:
+  ```
+  master      = Argon2id(pin, STATIC_SALT)
+  room_key    = HKDF-Expand(master, info="ktty-room-id", L=32)
+  encrypt_key = HKDF-Expand(master, info="ktty-encrypt", L=32)
+  mac_key     = HKDF-Expand(master, info="ktty-mac",     L=32)
+  room_id     = hex(room_key)
+  ```
+  Touch points: `backend/common/src/crypto.rs`, the agent's session key
+  init in `backend/agent/src/session.rs`, and `lib/services/crypto/`
+  on the Flutter side. Bump `VERSION` to 8.
+
+- **Mandatory URL-encrypt flow (audit H2 follow-up).** The agent already
+  has a `--encrypt-url` mode that produces a hex token sealing the relay
+  URL with the user's PIN. This eliminates one trust dimension on the
+  client side (the user no longer has to type the URL correctly). Today
+  it's optional and the dashboard accepts a free-form `wss://` URL.
+  **Fix:** make the dashboard accept *only* an encrypted URL token by
+  default; the free-form field becomes an "advanced" option.
+
+### Performance / scalability (security-adjacent but not exploitable)
+
+- **Shard the global rooms `Mutex` (audit M4).** Every WebSocket message
+  acquires `rooms.lock().await` up to three times. A chatty client can
+  serialize the entire relay. **Fix:** swap `Arc<Mutex<HashMap<...>>>`
+  for `Arc<DashMap<String, Arc<Mutex<Room>>>>` so locks are per-room.
+
+- **Per-IP connection limits (audit L4).** A single attacker can open
+  thousands of WebSocket upgrades and exhaust the Fly VM's file
+  descriptors before they've even joined a room. **Fix:** add a
+  `tower::limit::ConcurrencyLimitLayer`, or track per-IP counts in an
+  `Arc<DashMap<IpAddr, AtomicU32>>` and reject upgrades over a threshold.
+
+- **`sync_req` rate limit (audit M5).** A peer can repeatedly request
+  ring buffer replays, forcing the agent to re-encrypt up to 2 MB of
+  PTY history each time. Inside an authenticated session so not a
+  pre-auth DoS, but worth bounding. **Fix:** at most one `sync_req`
+  per N seconds per peer in `backend/agent/src/session.rs`.
+
+### Polish
+
+- **Document non-overlap requirement on `ktty_mlkem_encapsulate`
+  (audit L5).** Current callers always allocate three distinct buffers
+  via `calloc`, so the `copy_nonoverlapping` is sound — but the C ABI
+  contract isn't documented. Add a `# Safety` clause to
+  `backend/ffi-crypto/src/lib.rs`.
+
+- **Add a `SECURITY.md` with disclosure contact.** For a public crypto
+  repo this is table stakes. Should also link to this README's threat
+  model section.
+
+- **Drop `window._kttyCrypto` after Flutter has booted (audit H3
+  follow-up).** Right now we expose it to the page for the lifetime of
+  the session because the Flutter JS interop holds an indirect reference
+  through bound externs. Investigate whether we can `delete
+  window._kttyCrypto` once `runApp` has executed. The closure-bound JS
+  interop bindings should keep working after the global is gone.
+
+- **Constants drift detection.** The Argon2 parameters in
+  `backend/common/src/constants.rs` and the literal values in
+  `lib/services/crypto/native_crypto_ffi.dart` are duplicated. Add a
+  `cargo test` or build-time check that fails if they ever diverge.
+
+- **Tracked lockfiles for the test crates.** `tests/mlkem_interop/dart_test/pubspec.lock`
+  and `tests/mlkem_interop/rust_baseline/Cargo.lock` are gitignored —
+  for bin crates the lock files should be committed for reproducibility.
+
+- **Repo layout cleanup.** The repo root currently doubles as the
+  developer's project home (it contains `flutter/`, `android-sdk/`,
+  `.cargo/`, `.npm-global/`, etc., all gitignored). One bad
+  `git clean -fdx` would nuke all of those. Move the toolchains one
+  directory up so the git repo is a proper subdirectory.
 
 ---
 

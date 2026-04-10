@@ -193,10 +193,10 @@ Other hardening in the same change set:
 | `lib/state/session_state.dart` | `ChangeNotifier` holding URL, PIN, status, relay reachability. Provided via `package:provider`. |
 | `lib/state/keyboard_state.dart` | Holds the active layer (ABC=0, 123=1, SYM=2), shift/caps state. |
 | `lib/state/viewport_state.dart` | Portrait/landscape mode for the terminal layout. |
-| `lib/screens/dashboard_screen.dart` | URL + PIN entry, "Connect" button, ping indicator. URL field is read-only on native (custom keyboard handles input) but editable on web (uses native browser input). On PWA there's a 5-attempt rate limiter with 30s lockout. |
+| `lib/screens/dashboard_screen.dart` | PIN entry + Connect button + relay reachability indicator. The WebSocket URL field is shown only on native (so the user can point at a self-hosted relay) and **hidden on web** — the PWA always uses the default `wss://ktty-relay.fly.dev/ws` from the controller's initial value. On PWA there's a 5-attempt PIN rate limiter with 30s lockout. Both platforms enforce a minimum PIN length of 8 digits and reject any URL that doesn't start with `wss://`. The connection-indicator state on web comes from a real `/health` ping (see `ping_web.dart`); on native it's a `dart:io` HttpClient ping. |
 | `lib/screens/terminal_screen.dart` | Terminal page: xterm view, custom keyboard at the bottom, swipeable control cluster, keyboard-hide toggle. |
 | `lib/screens/ping_native.dart` | Native `HttpClient`-based relay HTTP ping (replaces `wss://` → `https://` and tries `GET /`). |
-| `lib/screens/ping_web.dart` | Web stub — always returns `true` (browsers can't do raw TCP probes). Selected via conditional import. |
+| `lib/screens/ping_web.dart` | Web reachability probe. Calls `window.fetch` (via `dart:js_interop`) against the relay's `/health` endpoint and returns `true` on a 2xx. The relay must serve `Access-Control-Allow-Origin: *` on `/health` (it does — see `backend/relay/src/main.rs`) and the PWA's CSP `connect-src` must whitelist the relay's https origin. Selected over `ping_native.dart` via conditional import on `dart.library.js_interop`. |
 | `lib/services/crypto/native_crypto.dart` | The dispatcher. Conditional import: `native_crypto_web.dart` on web, `native_crypto_ffi.dart` on native. Exposes a single `NativeCrypto` static class so the rest of the app doesn't care which platform it's on. |
 | `lib/services/crypto/native_crypto_ffi.dart` | **Native crypto.** Argon2id, XChaCha20-Poly1305, HMAC-SHA256 are pure Dart via `package:cryptography` (those are standardized — no interop risk). `mlkemEncapsulate` calls into `libktty_ffi_crypto.so` via `dart:ffi`. The C ABI is fixed-size (1184-byte input, 1088-byte ct output, 32-byte ss output) so memory management is trivial. |
 | `lib/services/crypto/native_crypto_web.dart` | **Web crypto.** All seven crypto functions are forwarded to `window._kttyCrypto.*`, which is set up in `web/index.html` from the WASM module. Uses `dart:js_interop` typed JS bindings. The PWA gets *all* crypto from Rust because Argon2 in pure Dart is too slow under JS, and consolidating in one place avoids any chance of subtle Dart-vs-Rust drift. |
@@ -215,8 +215,8 @@ Other hardening in the same change set:
 | `lib/widgets/keyboard/keyboard_layer.dart` | One layer of the keyboard — renders rows of keys. |
 | `lib/widgets/keyboard/key_button.dart` | Single key — handles tap, long-press, swipe, mic (for speech-to-text on Space). |
 | `lib/widgets/keyboard/key_definitions.dart` | The actual key layouts for ABC/123/SYM and the function-key drawer. |
-| `lib/widgets/keyboard/control_cluster.dart` | Ctrl/Tab/Esc/arrow row above the main keyboard. |
-| `lib/widgets/clipboard/clipboard_buttons.dart` | Copy/paste/mark buttons. Paste sends text via `sendText` directly (not as fake keystrokes). |
+| `lib/widgets/keyboard/control_cluster.dart` | Top row of the in-app keyboard: `Esc Tab Ctrl CAPS ↑ ↓ ← → ⌨`. The single `CAPS` key replaces the previous `ab`/`Aa` pair (one-shot shift is still available via the up-arrow on the qwerty bottom row). The keyboard-hide icon at the right end is a duplicate of the appBar's keyboard toggle, kept here for thumb-reachability. |
+| `lib/widgets/clipboard/clipboard_buttons.dart` | Copy + Paste icon buttons in the keyboard toolbar row. Paste sends text via `sendText` directly (not as fake keystrokes). The previous Mark Start / Mark End buttons (which toggled an explicit selection mode) are gone — xterm's drag-to-select gives the same selection workflow with no extra UI. |
 | `lib/mock/mock_ws_server.dart` | In-process mock relay for unit tests. |
 
 ### Native cdylib — `backend/ffi-crypto/`
@@ -285,7 +285,7 @@ in `backend/common/`, `backend/ffi-crypto/`, or `backend/wasm-crypto/`.
 | Path | Purpose |
 |---|---|
 | `web/index.html` | Page shell. Holds the strict CSP `<meta>` tag and loads `wasm-loader.js` *before* `flutter_bootstrap.js`. Does not contain any inline scripts (the CSP doesn't permit them). |
-| `web/wasm-loader.js` | External WASM loader. Imports `./wasm/ktty_wasm_crypto.js`, calls `init()`, then assigns the module namespace object directly to `window._kttyCrypto` and sets `window._kttyCryptoReady = true`. The `await init()` is at the **top level of an ES module** — that's the load-bearing detail, because top-level await blocks any subsequent `<script>` tag from running, so Flutter's `flutter_bootstrap.js` can't start until the WASM bindings are in place. Without that ordering, Flutter's `main.dart` would call `NativeCrypto.deriveKey` against an empty `window._kttyCrypto` and the resulting key would not match the agent's room id (the user-visible symptom is "Wrong PIN"). This file lives outside `index.html` because the CSP forbids inline scripts. |
+| `web/wasm-loader.js` | External WASM loader. Imports `./wasm/ktty_wasm_crypto.js`, calls `init()`, then assigns the module namespace object directly to `window._kttyCrypto` and sets `window._kttyCryptoReady = true`. The `await init()` is at the **top level of an ES module** — that's the load-bearing detail, because top-level await blocks any subsequent `<script>` tag from running, so Flutter's `flutter_bootstrap.js` can't start until the WASM bindings are in place. Without that ordering, Flutter's `main.dart` would call `NativeCrypto.deriveKey` against an empty `window._kttyCrypto` and the resulting key would not match the agent's room id (the user-visible symptom is "Wrong PIN"). This file lives outside `index.html` because the CSP forbids inline scripts. **Also unregisters any old `/KTTY/`-scoped service worker on every page load** — without that proactive cleanup, the Flutter SW happily serves a stale `main.dart.js` even in fresh incognito windows, and visitors get permanently stuck on the previous deploy. |
 | `web/manifest.json` | PWA manifest (name, icons, theme, display mode). |
 | `web/favicon.png`, `web/icons/Icon-*.png` | App icons (192/512 plus maskable). |
 
@@ -534,6 +534,8 @@ service worker aggressively caches `main.dart.js` and `index.html`.
 | PWA shows **"Crypto Module Unavailable"** | The WASM loader didn't run. Most common causes: (a) `web/wasm-loader.js` is missing from the deployed `gh-pages` branch — check `curl -I https://phuawenpu.github.io/KTTY/wasm-loader.js`. (b) The CSP in `web/index.html` is blocking `wasm-loader.js` (e.g. you removed `'self'` from `script-src`). (c) `web/wasm/ktty_wasm_crypto.{js,wasm}` is missing — re-run `./build-crypto.sh`. (d) Browser cached the old service worker — hard-reload (Ctrl+Shift+R). | Verify the loader file is reachable, the CSP allows `'self'` for scripts, and `web/wasm/` is populated. Rebuild with `flutter build web --release --base-href "/KTTY/"`. |
 | PWA shows **"Wrong PIN"** even with the correct PIN | Either the PWA was built without the load-order fix and is racing the WASM init, OR you're testing against an agent built before the auth-token-on-handshake change. | Confirm `web/wasm-loader.js` uses **top-level `await init()`** (not a fire-and-forget IIFE). Confirm the agent binary was built from commit `8715ffe42` or later (run `--version` if you've added one, or just rebuild). |
 | PWA loads but shows blank page | CSP is blocking Flutter's canvaskit renderer. The `script-src` and `connect-src` directives must include `https://www.gstatic.com`, and `font-src` should include `https://fonts.gstatic.com`. | Use the CSP from the current `web/index.html` as a reference. Don't tighten `script-src` to `'self'` only — canvaskit lives on gstatic. |
+| PWA "Disconnected" indicator stays red even when the relay is up | The `/health` cross-origin probe failed. Either the relay's `/health` handler is missing the `Access-Control-Allow-Origin` header (regression in `backend/relay/src/main.rs`), or the CSP `connect-src` is missing the relay's https origin, or the relay is genuinely unreachable. | `curl -H "Origin: https://phuawenpu.github.io" -i https://ktty-relay.fly.dev/health` should show `access-control-allow-origin: *`. If not, check `health_handler` in the relay. If the header is fine, check the CSP includes `https://ktty-relay.fly.dev` in `connect-src`. |
+| PWA shows the previous deploy after a new push | A stale Flutter service worker is intercepting fetches for `main.dart.js`. The SW killer in `web/wasm-loader.js` runs on every load and unregisters `/KTTY/`-scoped workers, so this should self-heal on the second visit. If you're stuck on the *first* visit after a deploy, open DevTools → Application → Service Workers → Unregister, then reload. | The killer code is in `web/wasm-loader.js` — don't remove it. If you need to deploy without a killer (e.g. testing), the user is one DevTools click away from being able to load the new build. |
 | `dart:ffi`: `Failed to load dynamic library "libktty_ffi_crypto.so"` | The cdylib wasn't bundled into the APK for the device's ABI. | Run `./build-crypto.sh` to repopulate `android/app/src/main/jniLibs/` for all 4 ABIs, then rebuild the APK. Confirm with `unzip -l app-release.apk \| grep libktty`. |
 | PWA stuck on the "Crypto Module Unavailable" screen | `web/wasm/ktty_wasm_crypto.{js,wasm}` missing or corrupted. | Run `./build-crypto.sh` (wasm-pack section), confirm the files exist, hard-reload the browser to dump the service worker cache. |
 | `flutter pub get` complains about `ktty_bridge` | An old `pubspec.yaml` from before the Rust-FFI removal. | The current `pubspec.yaml` has no `ktty_bridge` dep. Check you're on a clean `main`. |
@@ -750,7 +752,53 @@ but cargo needs the manifest present.
   with `--relay-url wss://ktty-relay.fly.dev/ws` (or set the
   `KTTY_RELAY_URL` env var). Use a PIN of 8 or more digits.
 
-### Phase 7 — picking up where this left off
+### Phase 8 — UI polish, PWA UX, and the long tail of CDN/SW caching
+
+The PWA was technically working after Phases 5–6 but had a string of
+small UX problems that needed cleanup before it could be considered
+shippable. All fixed in this batch:
+
+1. **Top app bar overflowed by 5px** on a 360-dp portrait phone.
+   Reduced the `KTTY` title font (17 → 13), the logo (22 → 18), and
+   the connection-indicator text (13 → 10) plus dot (8 → 6). Tightened
+   inter-element spacing.
+2. **Control cluster row overflowed by 29px**. Three changes that net
+   to no change in button count but eliminate the overflow:
+   - Collapsed the separate `ab` (one-shot shift) and `Aa` (caps lock)
+     buttons into a single `CAPS` toggle. The bottom-row `↑` on the
+     qwerty layer is still the one-shot shift if you only need one
+     capital, so nothing was lost.
+   - Moved the keyboard-hide button up out of the toolbar row into
+     the control cluster, taking the slot freed by the merge.
+   - Added a `_buildIconKey` helper for icon-only keys.
+3. **Removed Mark Start / Mark End buttons** from the clipboard row
+   in the keyboard toolbar. xterm's drag-to-select gives the same
+   selection workflow without an explicit marking mode. Copy + Paste
+   stay.
+4. **Hid the WebSocket URL field on the PWA** dashboard. The field
+   only renders when `!kIsWeb`, so the native APK still shows it
+   (for self-hosted relays) and the PWA only shows the PIN field.
+   The default `wss://ktty-relay.fly.dev/ws` is still held in the
+   controller's initial value.
+5. **Connection indicator on PWA was always red** because
+   `lib/screens/ping_web.dart` was a stub that returned `true` and
+   `_pingRelay()` was gated behind `!kIsWeb`. Now `ping_web.dart`
+   does a real `window.fetch` against `<relay>/health` via
+   `dart:js_interop`, the gate is dropped, and the relay's `/health`
+   handler in `backend/relay/src/main.rs` returns
+   `Access-Control-Allow-Origin: *` so the cross-origin probe
+   succeeds. CSP `connect-src` was also widened to include
+   `https://ktty-relay.fly.dev` and `https://*.fly.dev` (the
+   `wss://` entries were already there for the actual session).
+6. **Stale Flutter service worker** kept serving the previous build's
+   `main.dart.js` even in fresh incognito windows. Added a SW killer
+   to `web/wasm-loader.js` that runs on every page load and
+   unregisters any `/KTTY/`-scoped service worker. Flutter's loader
+   then re-registers a fresh one against the latest assets. One
+   extra round-trip on first paint, no more "stuck on stale build"
+   failures.
+
+### Phase 9 — picking up where this left off
 
 Future work is in the [Outstanding work](#outstanding-work--known-limitations)
 section below. The two big-ticket items are an HKDF-based key separation

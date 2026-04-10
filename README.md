@@ -927,114 +927,34 @@ afterwards or use a credential helper instead.
 
 ## Outstanding work / known limitations
 
-The 2026-04-10 audit flagged a number of additional issues that are
-**not** fixed in the current commit. They were deferred either because
-they require a coordinated wire-protocol bump (so the agent and client
-have to be redeployed in lockstep) or because they're performance work
-rather than security boundaries. Tackle them in a future v3 commit:
+Items left over from the 2026-04-10 security audit and subsequent
+PWA work, ranked by priority. Each entry is sized to be picked up
+cold next session — the goal, the files to touch, the steps, and
+the verification are all written out so you don't have to
+reconstruct context.
 
-### Wants a coordinated v3 wire-format bump
+**Priority key:**
+- **P0** — Security gap or trivial high-impact fix. Do soon.
+- **P1** — Crypto hygiene or quality work that should ship before
+  any "v3" wire-format bump.
+- **P2** — Polish, observability, refactors. Pick up when bored or
+  when something else forces you back into the file.
 
-- **HKDF-based key separation (audit M2).** Today the same Argon2id-derived
-  32-byte key is used as the room id (visible to the relay), the
-  XChaCha20-Poly1305 encryption key, *and* the HMAC-SHA256 key for the
-  ML-KEM verification step. Textbook key-separation violation. Not
-  exploitable on its own — HMAC-SHA256 and XChaCha20 are independent
-  primitives — but it means cracking the PIN reveals the encryption key
-  directly. **Fix:** derive three subkeys with HKDF-SHA256:
-  ```
-  master      = Argon2id(pin, STATIC_SALT)
-  room_key    = HKDF-Expand(master, info="ktty-room-id", L=32)
-  encrypt_key = HKDF-Expand(master, info="ktty-encrypt", L=32)
-  mac_key     = HKDF-Expand(master, info="ktty-mac",     L=32)
-  room_id     = hex(room_key)
-  ```
-  Touch points: `backend/common/src/crypto.rs`, the agent's session key
-  init in `backend/agent/src/session.rs`, and `lib/services/crypto/`
-  on the Flutter side. Bump `VERSION` to 8.
+### P0 — do these soon
 
-- **Mandatory URL-encrypt flow (audit H2 follow-up).** The agent already
-  has a `--encrypt-url` mode that produces a hex token sealing the relay
-  URL with the user's PIN. This eliminates one trust dimension on the
-  client side (the user no longer has to type the URL correctly). Today
-  it's optional and the dashboard accepts a free-form `wss://` URL.
-  **Fix:** make the dashboard accept *only* an encrypted URL token by
-  default; the free-form field becomes an "advanced" option.
-
-### Performance / scalability (security-adjacent but not exploitable)
-
-- **Shard the global rooms `Mutex` (audit M4).** Every WebSocket message
-  acquires `rooms.lock().await` up to three times. A chatty client can
-  serialize the entire relay. **Fix:** swap `Arc<Mutex<HashMap<...>>>`
-  for `Arc<DashMap<String, Arc<Mutex<Room>>>>` so locks are per-room.
-
-- **Per-IP connection limits (audit L4).** A single attacker can open
-  thousands of WebSocket upgrades and exhaust the Fly VM's file
-  descriptors before they've even joined a room. **Fix:** add a
-  `tower::limit::ConcurrencyLimitLayer`, or track per-IP counts in an
-  `Arc<DashMap<IpAddr, AtomicU32>>` and reject upgrades over a threshold.
-
-- **`sync_req` rate limit (audit M5).** A peer can repeatedly request
-  ring buffer replays, forcing the agent to re-encrypt up to 2 MB of
-  PTY history each time. Inside an authenticated session so not a
-  pre-auth DoS, but worth bounding. **Fix:** at most one `sync_req`
-  per N seconds per peer in `backend/agent/src/session.rs`.
-
-### Polish
-
-Each entry below is sized to be picked up cold next session — the
-goal, the files to touch, the steps, and the verification are all
-written out so you don't have to reconstruct context.
-
-#### 6. Document non-overlap requirement on `ktty_mlkem_encapsulate` (audit L5)
-
-**Goal:** Make the C-ABI contract for the FFI crypto entry-point
-explicit so a future caller can't accidentally introduce undefined
-behaviour.
-
-**Why it matters:** The function uses `std::ptr::copy_nonoverlapping`
-to write the ciphertext and shared secret outputs. If a caller ever
-passes overlapping pointers (e.g. the ek input and the ct output
-sharing memory), it's instant UB. Today's callers — `dart:ffi` on
-Android via three distinct `calloc` allocations and the WASM build
-— always pass disjoint buffers, so it's sound, but the contract
-isn't written down anywhere.
-
-**Files:** `backend/ffi-crypto/src/lib.rs`
-
-**Steps:**
-1. Add a `# Safety` doc-comment block above the existing comment on
-   `ktty_mlkem_encapsulate`. Required guarantees:
-   - `ek` points to ≥ 1184 readable bytes
-   - `ct_out` points to ≥ 1088 writable bytes
-   - `ss_out` points to ≥ 32 writable bytes
-   - **All three regions are pairwise non-overlapping**
-   - All three pointers are valid for the duration of the call
-2. While you're in the file, also document `ktty_ffi_crypto_version`
-   as `# Safety: none — pure read-only constant return`.
-3. Optionally add a debug-only `debug_assert!` that the input slice
-   length is exactly 1184 (currently it's hard-coded via
-   `from_raw_parts(ek, 1184)`).
-
-**Verify:** `cargo build -p ktty-ffi-crypto`. Then re-run
-`./build-crypto.sh` to refresh the committed `.so` files (the
-behavior is unchanged, but the fingerprint will differ). Run
-`cargo test -p ktty-common` to make sure nothing else regressed.
-
----
-
-#### 7. Add a `SECURITY.md` with a disclosure contact
+#### 1. Add a `SECURITY.md` with a disclosure contact (audit hygiene)
 
 **Goal:** Make it possible for a security researcher who finds a
 vulnerability in KTTY to report it to you privately instead of
-opening a public GitHub issue.
+opening a public GitHub issue. Cheapest item on the list — about
+five minutes of work.
 
 **Files:** new file `SECURITY.md` at the repo root.
 
 **Steps:**
 1. Create `SECURITY.md` with these sections:
-   - **Supported versions** — single line: only the `main` branch is
-     supported.
+   - **Supported versions** — single line: only the `main` branch
+     is supported.
    - **Reporting a vulnerability** — give an email address (or a
      GitHub Security Advisory link, see
      `https://github.com/phuawenpu/KTTY/security/advisories/new`)
@@ -1056,7 +976,331 @@ see a "Report a vulnerability" button appear automatically.
 
 ---
 
-#### 8. Drop `window._kttyCrypto` after Flutter has booted (audit H3 follow-up)
+#### 2. Per-IP connection limits on the relay (audit L4)
+
+**Goal:** Stop a single attacker from opening thousands of
+WebSocket upgrades and exhausting the Fly VM's file descriptors
+or memory before they've even joined a room. The relay today has
+no per-IP cap at all — only the bounded mpsc channels and frame
+size cap, both of which kick in *after* the upgrade.
+
+**Files:** `backend/relay/src/main.rs`,
+`backend/relay/Cargo.toml`.
+
+**Steps:**
+1. Add `dashmap = "6"` to `backend/relay/Cargo.toml` (or
+   `tower = { version = "0.5", features = ["limit"] }` if you
+   prefer the middleware approach — both work, dashmap is
+   simpler to reason about).
+2. **Approach A — manual per-IP counter (recommended):**
+   ```rust
+   use dashmap::DashMap;
+   use std::net::IpAddr;
+   use std::sync::atomic::{AtomicU32, Ordering};
+
+   const MAX_CONNS_PER_IP: u32 = 8;
+
+   type ConnLimits = Arc<DashMap<IpAddr, AtomicU32>>;
+   ```
+   Pass it through `with_state(...)` alongside the existing
+   `RoomMap`. In `ws_handler`, extract the client IP from the
+   `ConnectInfo<SocketAddr>` extractor (Axum gives you this if
+   you wire it up at `axum::serve(...).into_make_service_with_connect_info::<SocketAddr>()`).
+   Increment the counter on accept; reject the upgrade with a
+   `503` if the count is already at the cap; decrement in a
+   guard-on-drop wrapper inside `handle_socket`.
+3. **Approach B — `tower::limit::ConcurrencyLimitLayer`:** simpler
+   wiring (just `.layer(...)` on the Router), but it's a *global*
+   concurrency cap, not per-IP. Use only as a stopgap.
+4. Pick a reasonable cap. 8 connections per IP is generous (one
+   for the active session + a few for reconnect races) but blocks
+   a thousands-of-connections attack.
+5. Update the README's threat-model section to mention the new
+   limit.
+
+**Verify:** Locally run `cargo run -p ktty-relay -- 8080`. From
+another terminal, open 10 connections in parallel:
+```bash
+for i in $(seq 1 10); do
+  websocat ws://localhost:8080/ws &
+done
+wait
+```
+The first 8 should connect; connections 9 and 10 should be
+rejected at the upgrade. Check the relay log for the rejection
+messages.
+
+**Caveat:** Behind Fly's proxy, the perceived client IP is the Fly
+edge IP, not the real client. You probably want to look at the
+`Fly-Client-IP` header (Fly's documented forwarded-for header)
+instead of the TCP socket address. Check
+`https://fly.io/docs/networking/request-headers/` for the exact
+header name when implementing.
+
+---
+
+#### 3. HKDF-based key separation (audit M2)
+
+**Goal:** Today the same Argon2id-derived 32-byte key is used as
+the room id (visible to the relay), the XChaCha20-Poly1305
+encryption key, AND the HMAC-SHA256 key for the ML-KEM
+verification step. Textbook key-separation violation. Not
+directly exploitable — HMAC-SHA256 and XChaCha20 are independent
+primitives — but it means an offline crack of the PIN reveals the
+encryption key directly. Splitting via HKDF gives proper domain
+separation.
+
+**Files:** `backend/common/src/crypto.rs`,
+`backend/common/src/constants.rs`,
+`backend/agent/src/main.rs`,
+`backend/agent/src/session.rs`,
+`lib/services/crypto/native_crypto_ffi.dart`,
+`backend/wasm-crypto/src/lib.rs`,
+`lib/services/crypto/pin_utils.dart`.
+
+**The new derivation:**
+```
+master       = Argon2id(pin, STATIC_SALT, m=64MB, t=3, p=4, len=32)
+encrypt_key  = HKDF-SHA256-Expand(master, info=b"ktty-encrypt-v8", L=32)
+mac_key      = HKDF-SHA256-Expand(master, info=b"ktty-mac-v8",     L=32)
+room_key     = HKDF-SHA256-Expand(master, info=b"ktty-room-id-v8", L=32)
+room_id      = hex(room_key)
+```
+
+**Steps:**
+1. **Pick the HKDF crate.** `hkdf = "0.12"` is the standard Rust
+   crate (already a transitive dep of several others in the
+   workspace). On the Dart side, `package:cryptography` already
+   provides `Hkdf`.
+2. **Add a new function to `backend/common/src/crypto.rs`:**
+   ```rust
+   pub struct DerivedKeys {
+       pub master: [u8; 32],
+       pub encrypt: [u8; 32],
+       pub mac: [u8; 32],
+       pub room_key: [u8; 32],
+       pub room_id: String,
+   }
+
+   pub fn derive_keys(pin: &str) -> Result<DerivedKeys, CryptoError> {
+       let master = derive_key(pin)?;
+       let hkdf = hkdf::Hkdf::<sha2::Sha256>::new(None, &master);
+       let mut encrypt = [0u8; 32];
+       let mut mac = [0u8; 32];
+       let mut room_key = [0u8; 32];
+       hkdf.expand(b"ktty-encrypt-v8", &mut encrypt).unwrap();
+       hkdf.expand(b"ktty-mac-v8",     &mut mac).unwrap();
+       hkdf.expand(b"ktty-room-id-v8", &mut room_key).unwrap();
+       let room_id = hex::encode(room_key);
+       Ok(DerivedKeys { master, encrypt, mac, room_key, room_id })
+   }
+   ```
+   Add a roundtrip test for it.
+3. **Agent side** (`backend/agent/src/main.rs` and
+   `backend/agent/src/session.rs`): replace `derived_key` with
+   `derived_keys: DerivedKeys`. Use `derived_keys.encrypt` for
+   `crypto::encrypt`/`decrypt`, `derived_keys.mac` for
+   `compute_hmac`/`verify_hmac`, and `derived_keys.room_id` for
+   the join.
+4. **Flutter native side** (`native_crypto_ffi.dart`): mirror the
+   Rust HKDF derivation in pure Dart via `package:cryptography`'s
+   `Hkdf(hmac: Hmac.sha256(), outputLength: 32).deriveKey(...)`.
+   Expose the same `DerivedKeys`-shaped record. Update
+   `pin_utils.dart` to return the record.
+5. **Flutter web side**: add `deriveKeys` to
+   `backend/wasm-crypto/src/lib.rs` exporting the same function
+   from `ktty-common`. Update `native_crypto_web.dart` to call it.
+6. **Update `EncryptedEnvelope` consumers**: `crypto_service.dart`
+   and `handshake_service.dart` need to know which subkey to use.
+7. **Bump versions** in lockstep:
+   - `backend/agent/src/main.rs` → `const VERSION: u32 = 8;`
+   - `lib/config/constants.dart` → `const int kAppVersion = 8;`
+8. **Pre-deployment**: this is a breaking wire-format change. Old
+   client + new agent (or vice versa) will compute different
+   room IDs and fail to find each other. Plan a coordinated
+   release: redeploy the relay (no change), redeploy the agent on
+   every host, then push the new APK and PWA.
+
+**Verify:**
+1. `cargo test -p ktty-common` — the new `derive_keys` test must
+   pass and the existing roundtrip tests must still pass.
+2. End-to-end: on a fresh install, connect with a known PIN. The
+   room id should be different from the v7 derivation (because
+   the HKDF info string is different), but Flutter and agent
+   should still meet because both compute the same new value.
+3. Run `cargo build --release -p ktty-agent` and
+   `./build-crypto.sh` to refresh all artifacts.
+
+**Caveat:** Don't reuse the v7 `STATIC_SALT` constant if you ever
+want to retire v7 entirely — bump it to `KTTY STATIC SALT VERSION 2`
+so that v7 and v8 PINs are *different* derivations even with the
+same input. This is overkill for KTTY's threat model but good
+hygiene.
+
+---
+
+#### 4. Mandatory URL-encrypt flow (audit H2 follow-up)
+
+**Goal:** The agent already has a `--encrypt-url` mode that produces
+a hex token sealing the relay URL with the user's PIN. Today it's
+optional and the dashboard accepts a free-form `wss://` URL,
+which means a user who's been socially engineered into typing a
+malicious URL hands their room id to a MITM. Make the encrypted
+URL the default flow; the free-form field becomes an "advanced"
+option.
+
+**Files:** `backend/agent/src/main.rs`,
+`lib/screens/dashboard_screen.dart`,
+`lib/services/websocket/websocket_service.dart`,
+`lib/services/crypto/pin_utils.dart`.
+
+**Steps:**
+1. **Agent side**: confirm `--encrypt-url` already produces a
+   hex-encoded `crypto::encrypt(derived_key, relay_url)`. The
+   user runs it once with their PIN to produce a token they can
+   paste into the PWA / APK.
+2. **Flutter side**: change the dashboard to show two fields:
+   - Default: a single "Connection token" field (the encrypted URL
+     hex).
+   - Behind an "Advanced" expansion: a free-form "Relay URL" + PIN
+     pair, the existing flow.
+3. **Decryption in `websocket_service.dart`**: when the user
+   provides a token, derive the key from the PIN, decrypt the
+   token via `NativeCrypto.decrypt(derivedKey, hexDecode(token))`,
+   and use the resulting URL string as the WS endpoint. On
+   decryption failure, surface a clear error ("Wrong PIN or
+   corrupted token") instead of progressing to the connect.
+4. **Dashboard validation**: token must be a valid hex string
+   long enough to contain at least the nonce + tag (24 + 16 = 40
+   bytes = 80 hex chars).
+5. **Update README + dashboard help text** to explain the new
+   default flow.
+
+**Verify:**
+1. `./ktty-agent --encrypt-url --relay-url wss://ktty-relay.fly.dev/ws`
+   then enter a PIN. It prints a hex token.
+2. Paste the token + same PIN into the new dashboard token field.
+   Connect should succeed.
+3. Paste the token + a wrong PIN. Should fail with the friendly
+   error.
+4. The "Advanced" expansion should still allow the old free-form
+   flow for self-hosted relays.
+
+**Caveat:** This adds a manual copy-paste step every time the
+user installs the app. Mitigate with a QR code: render the token
+as a QR on the agent's stdout (use the `qrcode` Rust crate), and
+add a QR scanner button to the dashboard (use
+`mobile_scanner` Flutter package). That's a follow-up — ship the
+plain token first.
+
+---
+
+### P1 — should ship before any v3 release
+
+#### 5. `sync_req` rate limit (audit M5)
+
+**Goal:** A peer can repeatedly send `sync_req` to the agent,
+forcing it to re-encrypt up to 2 MB of PTY history each time.
+This is inside an authenticated session so it's not a pre-auth
+DoS, but it's still a free amplification primitive for any
+attacker who has the PIN. Bound it.
+
+**Files:** `backend/agent/src/session.rs`.
+
+**Steps:**
+1. Add `last_sync_req_at: Option<tokio::time::Instant>` to the
+   bridge state in `session.rs`.
+2. In the message handler that recognises `sync_req`, check the
+   delta from the previous sync request:
+   ```rust
+   const MIN_SYNC_INTERVAL: Duration = Duration::from_secs(5);
+   if let Some(last) = last_sync_req_at {
+       if last.elapsed() < MIN_SYNC_INTERVAL {
+           eprintln!("[agent] Dropping rate-limited sync_req");
+           continue; // skip the replay
+       }
+   }
+   last_sync_req_at = Some(tokio::time::Instant::now());
+   ```
+3. Also add a sanity cap on the requested `last_seq`: if the
+   client asks for a replay starting at `last_seq < current_seq -
+   ring_buffer_size`, reply with an error envelope instead of
+   silently sending nothing.
+
+**Verify:** From a connected client, fire `sync_req` twice in
+quick succession. The second one should be dropped per the agent
+log line.
+
+**Caveat:** The legitimate client only sends `sync_req` once on
+reconnect (see `terminal_service.dart#_requestSync`), so a 5-
+second cap is conservative — reconnects don't happen that fast in
+practice. If you ever add a "force resync" button to the UI, make
+sure it doesn't violate the cap.
+
+---
+
+#### 6. Constants drift detection (Rust ↔ Dart)
+
+**Goal:** Make it impossible for the Argon2 / XChaCha20 / HMAC
+parameters to silently diverge between the Rust and Dart sides of
+the protocol. Today they're hard-coded literals in two places;
+nothing fails loudly if they get out of sync. A drift would
+silently produce different room IDs and the user would just see
+"No agent found" with no clue why.
+
+**Files:** `backend/common/src/constants.rs`,
+`lib/services/crypto/native_crypto_ffi.dart`,
+`backend/wasm-crypto/src/lib.rs` (already pulls from common, so OK),
+new file `tests/constants_drift_test.dart` or extension to existing
+`backend/common/src/crypto.rs` tests.
+
+**Constants that must stay in sync:**
+- `STATIC_SALT` (string `"KTTY STATIC SALT VERSION 1"`)
+- `ARGON2_M_COST` (65536)
+- `ARGON2_T_COST` (3)
+- `ARGON2_P_COST` (4)
+- `ARGON2_OUTPUT_LEN` (32)
+- `NONCE_LEN` (24)
+- `MAC_LEN` (16)
+
+**Steps:**
+1. **Cleanest approach** — move the Dart-side constants out of
+   `native_crypto_ffi.dart` into a small `constants.dart` file in
+   `lib/services/crypto/`, then make a `cargo test` that reads
+   that file and parses the integer literals out, comparing them
+   to the Rust constants in `backend/common/src/constants.rs`.
+   Sketch:
+   ```rust
+   #[test]
+   fn dart_constants_match_rust() {
+       let dart = std::fs::read_to_string("../../lib/services/crypto/constants.dart").unwrap();
+       assert!(dart.contains(&format!("argon2MCost = {}", ARGON2_M_COST)));
+       assert!(dart.contains(&format!("argon2TCost = {}", ARGON2_T_COST)));
+       // ... and so on
+       assert!(dart.contains(&format!("staticSalt = '{}'", std::str::from_utf8(STATIC_SALT).unwrap())));
+   }
+   ```
+2. **Wire it into CI** — add `cargo test -p ktty-common` to any
+   CI configuration you ever set up. (No CI today; this becomes
+   a manual `cargo test` for now.)
+3. **Update both files** if any constant ever changes — bump the
+   `STATIC_SALT` version string ("KTTY STATIC SALT VERSION 2")
+   too, since changing parameters is effectively a key-derivation
+   wire-format change.
+
+**Verify:** Intentionally change one Dart constant by 1 and run
+`cargo test -p ktty-common` — it must fail. Revert and re-run; it
+must pass.
+
+**Caveat:** This is a string-grep test, not a real type check. A
+fancier version would generate the Dart constants file from the
+Rust constants at build time (e.g. via a build.rs script that
+writes `constants.dart` from a template). Worth considering if
+the constants ever multiply.
+
+---
+
+#### 7. Drop `window._kttyCrypto` after Flutter has booted (audit H3 follow-up)
 
 **Goal:** Reduce the attack surface of the WASM crypto exposed to
 the page. Today the global lives forever; ideally it's only present
@@ -1121,66 +1365,231 @@ proof that the bindings were captured before the delete).
 
 ---
 
-#### 9. Constants drift detection
+#### 8. Document non-overlap requirement on `ktty_mlkem_encapsulate` (audit L5)
 
-**Goal:** Make it impossible for the Argon2 / XChaCha20 / HMAC
-parameters to silently diverge between the Rust and Dart sides of
-the protocol. Today they're hard-coded literals in two places;
-nothing fails loudly if they get out of sync.
+**Goal:** Make the C-ABI contract for the FFI crypto entry-point
+explicit so a future caller can't accidentally introduce undefined
+behaviour.
 
-**Files:** `backend/common/src/constants.rs`,
-`lib/services/crypto/native_crypto_ffi.dart`,
-`backend/wasm-crypto/src/lib.rs` (already pulls from common, so OK),
-new file `tests/constants_drift_test.dart` or extension to existing
-`backend/common/src/crypto.rs` tests.
+**Why it matters:** The function uses `std::ptr::copy_nonoverlapping`
+to write the ciphertext and shared secret outputs. If a caller ever
+passes overlapping pointers (e.g. the ek input and the ct output
+sharing memory), it's instant UB. Today's callers — `dart:ffi` on
+Android via three distinct `calloc` allocations and the WASM build
+— always pass disjoint buffers, so it's sound, but the contract
+isn't written down anywhere.
 
-**Constants that must stay in sync:**
-- `STATIC_SALT` (string `"KTTY STATIC SALT VERSION 1"`)
-- `ARGON2_M_COST` (65536)
-- `ARGON2_T_COST` (3)
-- `ARGON2_P_COST` (4)
-- `ARGON2_OUTPUT_LEN` (32)
-- `NONCE_LEN` (24)
-- `MAC_LEN` (16)
+**Files:** `backend/ffi-crypto/src/lib.rs`
 
 **Steps:**
-1. **Cleanest approach** — move the Dart-side constants out of
-   `native_crypto_ffi.dart` into a small `constants.dart` file in
-   `lib/services/crypto/`, then make a `cargo test` that reads
-   that file and parses the integer literals out, comparing them
-   to the Rust constants in `backend/common/src/constants.rs`.
-   Sketch:
-   ```rust
-   #[test]
-   fn dart_constants_match_rust() {
-       let dart = std::fs::read_to_string("../../lib/services/crypto/constants.dart").unwrap();
-       assert!(dart.contains(&format!("argon2MCost = {}", ARGON2_M_COST)));
-       assert!(dart.contains(&format!("argon2TCost = {}", ARGON2_T_COST)));
-       // ... and so on
-       assert!(dart.contains(&format!("staticSalt = '{}'", std::str::from_utf8(STATIC_SALT).unwrap())));
-   }
-   ```
-2. **Wire it into CI** — add `cargo test -p ktty-common` to any
-   CI configuration you ever set up. (No CI today; this becomes
-   a manual `cargo test` for now.)
-3. **Update both files** if any constant ever changes — bump the
-   `STATIC_SALT` version string ("KTTY STATIC SALT VERSION 2")
-   too, since changing parameters is effectively a key-derivation
-   wire-format change.
+1. Add a `# Safety` doc-comment block above the existing comment on
+   `ktty_mlkem_encapsulate`. Required guarantees:
+   - `ek` points to ≥ 1184 readable bytes
+   - `ct_out` points to ≥ 1088 writable bytes
+   - `ss_out` points to ≥ 32 writable bytes
+   - **All three regions are pairwise non-overlapping**
+   - All three pointers are valid for the duration of the call
+2. While you're in the file, also document `ktty_ffi_crypto_version`
+   as `# Safety: none — pure read-only constant return`.
+3. Optionally add a debug-only `debug_assert!` that the input slice
+   length is exactly 1184 (currently it's hard-coded via
+   `from_raw_parts(ek, 1184)`).
 
-**Verify:** Intentionally change one Dart constant by 1 and run
-`cargo test -p ktty-common` — it must fail. Revert and re-run; it
-must pass.
-
-**Caveat:** This is a string-grep test, not a real type check. A
-fancier version would generate the Dart constants file from the
-Rust constants at build time (e.g. via a build.rs script that
-writes `constants.dart` from a template). Worth considering if
-the constants ever multiply.
+**Verify:** `cargo build -p ktty-ffi-crypto`. Then re-run
+`./build-crypto.sh` to refresh the committed `.so` files (the
+behavior is unchanged, but the fingerprint will differ). Run
+`cargo test -p ktty-common` to make sure nothing else regressed.
 
 ---
 
-#### 10. Tracked lockfiles for the test crates
+### P2 — polish, observability, refactors
+
+Pick these up when bored, or when you're already in the file for
+another reason. None of them are blocking and none are
+security-critical.
+
+#### 9. Shard the global rooms `Mutex` on the relay (audit M4)
+
+**Goal:** Today every WebSocket message processed by the relay
+acquires `rooms.lock().await` up to three times (auth check,
+forward, activity update). With a `tokio::sync::Mutex` wrapping
+the entire `HashMap<String, Room>`, a single chatty client can
+serialise the entire relay across all rooms — every other peer
+waits behind the lock. The fix is to shard so each room has its
+own lock and operations on different rooms don't contend.
+
+**Files:** `backend/relay/src/main.rs`, `backend/relay/Cargo.toml`.
+
+**Steps:**
+1. Add `dashmap = "6"` to `backend/relay/Cargo.toml` if it's not
+   already there from item 2.
+2. Change the type alias:
+   ```rust
+   // Old:
+   // type RoomMap = Arc<Mutex<HashMap<String, Room>>>;
+   // New:
+   type RoomMap = Arc<dashmap::DashMap<String, Arc<tokio::sync::Mutex<Room>>>>;
+   ```
+3. Update every `rooms.lock().await` site:
+   - `rooms.entry(room_id.clone()).or_insert_with(|| Arc::new(Mutex::new(Room::new())))`
+     to get-or-insert the room handle.
+   - Then `room_arc.lock().await` to get into that one room's
+     state. The lock is now per-room, so concurrent traffic in
+     other rooms doesn't block.
+4. The background eviction task currently iterates the whole map
+   under one lock. Rewrite it to walk `rooms.iter()` (DashMap's
+   iterator yields shard-locked references) and lock each
+   `Arc<Mutex<Room>>` individually.
+5. The forward-to-other-peer path needs to look up its target
+   peer in the SAME room, so just hold that one room's lock for
+   the duration. No cross-room locks ever.
+6. Drop the `tokio::sync::Mutex` wrapper around the outer map —
+   `DashMap` is internally sharded so it doesn't need an outer
+   lock at all.
+
+**Verify:** Run the existing relay tests if you have any
+(`cargo test -p ktty-relay`). Locally start the relay, connect
+two clients to two *different* rooms, and use one of them to
+flood data. The other should see no latency increase. (Without
+the shard fix, the second client would feel the contention.)
+
+**Caveat:** This is a non-trivial refactor of the relay's
+locking discipline. Take a backup of `backend/relay/src/main.rs`
+before starting and do it in one focused session. The compiler
+will catch most mistakes (`MutexGuard` doesn't implement `Send`
+across `await` points unless the lock is held briefly), but
+behavioural bugs around eviction order are easy to introduce.
+
+---
+
+#### 10. Measure RTT for non-printable input (Tab/Esc/arrows)
+
+**Goal:** The session-stats popup currently only times keystrokes
+in the printable ASCII range (0x20–0x7E) because that's the only
+path that goes through the local-echo predictor. Tab, Esc, and
+the arrow keys take an unmeasured detour. Add a separate
+sequence-correlated path so the popup reflects *all* input
+latency, not just the printable subset.
+
+**Files:** `lib/services/terminal/terminal_service.dart`,
+`backend/agent/src/session.rs`,
+`backend/common/src/messages.rs`,
+`backend/agent/src/main.rs`,
+`lib/config/constants.dart`.
+
+**Steps:**
+1. **Decide on the correlation key.** Options:
+   - **(a) per-message timestamps in the envelope** — add an
+     optional `client_send_ms` field to the `pty` envelope. The
+     agent ignores it; on the way back, the agent's PTY-output
+     envelope includes the *client* timestamp of the *last input*
+     it processed before this output, so the client can compute
+     RTT on receipt. This requires an agent change and a
+     wire-format extension (back-compat: old clients omit the
+     field, agent omits the echo, client gets no measurement —
+     graceful degrade).
+   - **(b) opaque correlation token** — client adds a 4-byte
+     `cid` field to each input envelope; agent echoes the most
+     recently received `cid` on its next output envelope. Same
+     idea, smaller wire impact, slightly fiddlier semantics.
+2. **Pick (a)**. It's simpler and the wire impact is one extra
+   integer field. Update `EncryptedEnvelope` in
+   `backend/common/src/messages.rs` to include
+   `#[serde(skip_serializing_if = "Option::is_none")] pub client_send_ms: Option<i64>`.
+3. **Agent side** (`backend/agent/src/session.rs`): keep a
+   `last_client_send_ms: Option<i64>` field on the bridge state.
+   On every input envelope, update it. On every output envelope
+   the agent generates from PTY data, copy it through to the
+   outbound envelope's `client_send_ms` field, then clear the
+   stored value (or keep stamping until the next input arrives).
+4. **Client side** (`terminal_service.dart`): in `_sendPty`, set
+   `client_send_ms = DateTime.now().millisecondsSinceEpoch` on
+   the outbound envelope. In `_handleMessage` for `type == 'pty'`,
+   if the incoming envelope has `client_send_ms`, compute
+   `now - client_send_ms` and feed it to a *separate* stats bucket
+   (`stats.noteControlRtt(...)` or just merge with the existing
+   `noteRtt`).
+5. **Decide on bucketing.** Probably best to split: keep the
+   echo-based RTT as "round-trip from local-echo prediction" and
+   add a new "round-trip from input timestamp" metric in the
+   popup. They measure subtly different things.
+6. **Wire format version bump.** This is technically a wire change.
+   Bump `VERSION` in `backend/agent/src/main.rs` and `kAppVersion`
+   in `lib/config/constants.dart` together. Old clients against
+   new agents → field is ignored, no measurement. New clients
+   against old agents → field is sent and ignored, no
+   measurement. Graceful both ways.
+
+**Verify:** Connect, type a few normal keys, then press
+Tab/Esc/arrow several times. Open the stats popup. The Tab/Esc
+RTT should be in the same ballpark as the printable RTT (within
+the noise floor of one keystroke).
+
+**Caveat:** Clock skew between client and agent is irrelevant for
+RTT measurement because both timestamps come from the *client*
+clock. As long as Dart's `DateTime.now()` is monotonic, this works.
+
+---
+
+#### 11. Persist smart-invert toggle and stats across app restarts
+
+**Goal:** The smart-invert (light/dark) terminal toggle currently
+resets to dark on every app launch. Some users will want sticky
+preferences. Same for the session-stats baseline — currently the
+rolling RTT buffer is in-memory only and clears on disconnect.
+
+**Files:** `pubspec.yaml`, `lib/state/session_state.dart` (or new
+file), `lib/screens/terminal_screen.dart`, `lib/main.dart`.
+
+**Steps:**
+1. Add `shared_preferences: ^2.3.0` (or current latest) to the
+   `dependencies` block of `pubspec.yaml`. Run `flutter pub get`.
+2. Create or extend a settings holder. Simplest: add to the
+   existing `SessionState` change-notifier in `lib/state/session_state.dart`:
+   ```dart
+   bool _invertedTheme = false;
+   bool get invertedTheme => _invertedTheme;
+   Future<void> setInvertedTheme(bool v) async {
+     _invertedTheme = v;
+     notifyListeners();
+     final prefs = await SharedPreferences.getInstance();
+     await prefs.setBool('invertedTheme', v);
+   }
+   Future<void> loadSettings() async {
+     final prefs = await SharedPreferences.getInstance();
+     _invertedTheme = prefs.getBool('invertedTheme') ?? false;
+     notifyListeners();
+   }
+   ```
+3. In `lib/main.dart`, call `await SessionState.loadSettings()` (or
+   make it part of the constructor) before `runApp` so the initial
+   state is correct on the first frame.
+4. In `lib/screens/terminal_screen.dart`, replace the local
+   `_invertedTheme` boolean with `context.watch<SessionState>().invertedTheme`,
+   and replace `_toggleInvert` with
+   `context.read<SessionState>().setInvertedTheme(!current)`.
+5. Drop the now-unused local field and method.
+
+**Stats persistence (optional second step):** if you also want
+the latency stats to survive app restarts (so you can see "average
+over the last 100 keystrokes" across multiple sessions), serialise
+the `_rttSamples` list into prefs on each `noteRtt` call. Be
+careful with frequency — write at most once per N seconds via a
+debounce timer, not on every keystroke, or you'll thrash the
+SharedPreferences disk file.
+
+**Verify:** Toggle smart-invert, kill the app, relaunch. The
+toggle should still be in the previous state. Same for stats if
+you implemented that part.
+
+**Caveat:** `SharedPreferences` isn't encrypted. Don't ever stash
+the user's PIN there — only UI preferences and non-sensitive
+metrics. The PIN is already correctly held only in `_lastPin` in
+`websocket_service.dart`, in memory, and zeroed on disconnect.
+
+---
+
+#### 12. Tracked lockfiles for the test crates
 
 **Goal:** Make `tests/mlkem_interop/` reproducible by committing
 its lockfiles. They're currently gitignored.
@@ -1222,7 +1631,7 @@ both still work.
 
 ---
 
-#### 11. Repo layout cleanup — move toolchains out of the repo root
+#### 13. Repo layout cleanup — move toolchains out of the repo root
 
 **Goal:** Stop the repo root from doubling as the developer's
 project home. Today `flutter/`, `android-sdk/`, `.cargo/`,
@@ -1276,129 +1685,6 @@ only source directories (`backend/`, `lib/`, `web/`, `android/`,
 it's just `mv`. Take a backup of the workspace first
 (`tar czf ~/ktty-backup.tar.gz workspace/`) so a rollback is one
 `tar xzf` away.
-
----
-
-#### 12. Measure RTT for non-printable input (Tab/Esc/arrows)
-
-**Goal:** The session-stats popup currently only times keystrokes
-in the printable ASCII range (0x20–0x7E) because that's the only
-path that goes through the local-echo predictor. Tab, Esc, and
-the arrow keys take an unmeasured detour. Add a separate
-sequence-correlated path so the popup reflects *all* input
-latency, not just the printable subset.
-
-**Files:** `lib/services/terminal/terminal_service.dart`,
-`backend/agent/src/session.rs`.
-
-**Steps:**
-1. **Decide on the correlation key.** Options:
-   - **(a) per-message timestamps in the envelope** — add an
-     optional `client_send_ms` field to the `pty` envelope. The
-     agent ignores it; on the way back, the agent's PTY-output
-     envelope includes the *client* timestamp of the *last input*
-     it processed before this output, so the client can compute
-     RTT on receipt. This requires an agent change and a
-     wire-format extension (back-compat: old clients omit the
-     field, agent omits the echo, client gets no measurement —
-     graceful degrade).
-   - **(b) opaque correlation token** — client adds a 4-byte
-     `cid` field to each input envelope; agent echoes the most
-     recently received `cid` on its next output envelope. Same
-     idea, smaller wire impact, slightly fiddlier semantics.
-2. **Pick (a)**. It's simpler and the wire impact is one extra
-   integer field. Update `EncryptedEnvelope` in
-   `backend/common/src/messages.rs` to include `#[serde(skip_serializing_if = "Option::is_none")] pub client_send_ms: Option<i64>`.
-3. **Agent side** (`backend/agent/src/session.rs`): keep a
-   `last_client_send_ms: Option<i64>` field on the bridge state.
-   On every input envelope, update it. On every output envelope
-   the agent generates from PTY data, copy it through to the
-   outbound envelope's `client_send_ms` field, then clear the
-   stored value (or keep stamping until the next input arrives).
-4. **Client side** (`terminal_service.dart`): in `_sendPty`, set
-   `client_send_ms = DateTime.now().millisecondsSinceEpoch` on
-   the outbound envelope. In `_handleMessage` for `type == 'pty'`,
-   if the incoming envelope has `client_send_ms`, compute
-   `now - client_send_ms` and feed it to a *separate* stats bucket
-   (`stats.noteControlRtt(...)` or just merge with the existing
-   `noteRtt`).
-5. **Decide on bucketing.** Probably best to split: keep the
-   echo-based RTT as "round-trip from local-echo prediction" and
-   add a new "round-trip from input timestamp" metric in the
-   popup. They measure subtly different things.
-6. **Wire format version bump.** This is technically a wire change.
-   Bump `VERSION` in `backend/agent/src/main.rs` and `kAppVersion`
-   in `lib/config/constants.dart` together. Old clients against
-   new agents → field is ignored, no measurement. New clients
-   against old agents → field is sent and ignored, no
-   measurement. Graceful both ways.
-
-**Verify:** Connect, type a few normal keys, then press
-Tab/Esc/arrow several times. Open the stats popup. The Tab/Esc
-RTT should be in the same ballpark as the printable RTT (within
-the noise floor of one keystroke).
-
-**Caveat:** Clock skew between client and agent is irrelevant for
-RTT measurement because both timestamps come from the *client*
-clock. As long as Dart's `DateTime.now()` is monotonic, this works.
-
----
-
-#### 13. Persist smart-invert toggle and stats across app restarts
-
-**Goal:** The smart-invert (light/dark) terminal toggle currently
-resets to dark on every app launch. Some users will want sticky
-preferences. Same for the session-stats baseline — currently the
-rolling RTT buffer is in-memory only and clears on disconnect.
-
-**Files:** `pubspec.yaml`, `lib/state/session_state.dart` (or new
-file), `lib/screens/terminal_screen.dart`.
-
-**Steps:**
-1. Add `shared_preferences: ^2.3.0` (or current latest) to the
-   `dependencies` block of `pubspec.yaml`. Run `flutter pub get`.
-2. Create or extend a settings holder. Simplest: add to the
-   existing `SessionState` change-notifier in `lib/state/session_state.dart`:
-   ```dart
-   bool _invertedTheme = false;
-   bool get invertedTheme => _invertedTheme;
-   Future<void> setInvertedTheme(bool v) async {
-     _invertedTheme = v;
-     notifyListeners();
-     final prefs = await SharedPreferences.getInstance();
-     await prefs.setBool('invertedTheme', v);
-   }
-   Future<void> loadSettings() async {
-     final prefs = await SharedPreferences.getInstance();
-     _invertedTheme = prefs.getBool('invertedTheme') ?? false;
-     notifyListeners();
-   }
-   ```
-3. In `lib/main.dart`, call `await SessionState.loadSettings()` (or
-   make it part of the constructor) before `runApp` so the initial
-   state is correct on the first frame.
-4. In `lib/screens/terminal_screen.dart`, replace the local
-   `_invertedTheme` boolean with `context.watch<SessionState>().invertedTheme`,
-   and replace `_toggleInvert` with
-   `context.read<SessionState>().setInvertedTheme(!current)`.
-5. Drop the now-unused local field and method.
-
-**Stats persistence (optional second step):** if you also want
-the latency stats to survive app restarts (so you can see "average
-over the last 100 keystrokes" across multiple sessions), serialise
-the `_rttSamples` list into prefs on each `noteRtt` call. Be
-careful with frequency — write at most once per N seconds via a
-debounce timer, not on every keystroke, or you'll thrash the
-SharedPreferences disk file.
-
-**Verify:** Toggle smart-invert, kill the app, relaunch. The
-toggle should still be in the previous state. Same for stats if
-you implemented that part.
-
-**Caveat:** `SharedPreferences` isn't encrypted. Don't ever stash
-the user's PIN there — only UI preferences and non-sensitive
-metrics. The PIN is already correctly held only in `_lastPin` in
-`websocket_service.dart`, in memory, and zeroed on disconnect.
 
 ---
 

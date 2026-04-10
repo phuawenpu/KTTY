@@ -910,6 +910,67 @@ rather than security boundaries. Tackle them in a future v3 commit:
 
 ### Polish
 
+- **Smart-invert "light mode" toggle for the terminal (Android, ~30
+  lines).** Add a button in the appBar that flips the terminal between
+  dark and light backgrounds *while preserving the ANSI red/green/yellow
+  highlight colours*. Don't try to swap the xterm `TerminalTheme` palette
+  by hand — instead wrap the `TerminalContainer` in a Flutter
+  `ColorFiltered` widget with a matrix that does `invert` followed by
+  `hue-rotate(180°)`. That composition has the magic property that
+  white↔black flip but every primary/secondary RGB colour comes out the
+  same: red→cyan→red, green→magenta→green, blue→yellow→blue, and so on.
+  This is the same trick iOS Smart Invert and several CSS dark-mode
+  shims use.
+
+  Sketch (`lib/screens/terminal_screen.dart`):
+
+  ```dart
+  // In _TerminalScreenState:
+  bool _invertedTheme = false;
+
+  // The combined invert + hue-rotate(180°) matrix, scaled for
+  // Flutter's 0–255 channel space. Re-derive analytically if you
+  // want exact values; these are good enough for visual smart-invert.
+  static const List<double> _smartInvertMatrix = [
+    0.39, -1.21, -0.18, 0, 255,
+   -0.21,  0.79, -0.58, 0, 255,
+   -0.21, -0.21,  0.42, 0, 255,
+    0,     0,     0,    1, 0,
+  ];
+
+  // Wrap the TerminalContainer:
+  final terminal = TerminalContainer(...);
+  final maybeInverted = _invertedTheme
+      ? ColorFiltered(
+          colorFilter: const ColorFilter.matrix(_smartInvertMatrix),
+          child: terminal,
+        )
+      : terminal;
+
+  // Add to appBar actions:
+  IconButton(
+    icon: Icon(_invertedTheme ? Icons.dark_mode : Icons.light_mode, size: 18),
+    onPressed: () => setState(() => _invertedTheme = !_invertedTheme),
+    padding: EdgeInsets.zero,
+    constraints: const BoxConstraints(),
+    tooltip: _invertedTheme ? 'Dark mode' : 'Light mode',
+  ),
+  ```
+
+  Limit the filter to the `TerminalContainer` only — do NOT wrap the
+  whole `Scaffold` or you'll invert the appBar, the keyboard, and the
+  connection indicator too. The keyboard sits outside the
+  `ColorFiltered` subtree so it stays its native dark theme regardless
+  of terminal mode.
+
+  Caveats: `ColorFiltered` forces an offscreen layer, so the terminal
+  text re-rasterises each frame instead of being cached. Cost is
+  negligible for an 80×24 grid; measure if you ever ship to desktop.
+  Persisting the toggle across sessions is one `shared_preferences`
+  call away — drop it on `SessionState` since it's already a
+  `ChangeNotifier`. Wrap the appBar button in `if (!kIsWeb)` if you
+  want it Android-only.
+
 - **Document non-overlap requirement on `ktty_mlkem_encapsulate`
   (audit L5).** Current callers always allocate three distinct buffers
   via `calloc`, so the `copy_nonoverlapping` is sound — but the C ABI

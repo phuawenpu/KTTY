@@ -194,7 +194,7 @@ Other hardening in the same change set:
 | `lib/state/keyboard_state.dart` | Holds the active layer (ABC=0, 123=1, SYM=2), shift/caps state. |
 | `lib/state/viewport_state.dart` | Portrait/landscape mode for the terminal layout. |
 | `lib/screens/dashboard_screen.dart` | PIN entry + Connect button + relay reachability indicator. The WebSocket URL field is shown only on native (so the user can point at a self-hosted relay) and **hidden on web** — the PWA always uses the default `wss://ktty-relay.fly.dev/ws` from the controller's initial value. On PWA there's a 5-attempt PIN rate limiter with 30s lockout. Both platforms enforce a minimum PIN length of 8 digits and reject any URL that doesn't start with `wss://`. The connection-indicator state on web comes from a real `/health` ping (see `ping_web.dart`); on native it's a `dart:io` HttpClient ping. |
-| `lib/screens/terminal_screen.dart` | Terminal page: appBar with status / font-size / keyboard-toggle / smart-invert / disconnect / rotate buttons, an `xterm` view, the custom keyboard at the bottom, and a swipeable control cluster. The smart-invert toggle wraps the `TerminalContainer` in a `ColorFiltered` widget with an `invert + hue-rotate(180°)` matrix so white↔black flip while red/green/yellow/blue highlights stay recognisably the same colour. The filter is scoped to the terminal subtree only — the appBar and keyboard stay dark regardless of mode. |
+| `lib/screens/terminal_screen.dart` | Terminal page. AppBar layout: logo (in `leading:`), then a `KttyTitle` whose colour reflects connection status, then a small status dot, then action buttons (font −/+, keyboard toggle, smart-invert, **info**, disconnect, rotate). The info button opens a `_StatsDialog` popup that ticks once a second and shows live keystroke RTT (last/avg/min/max over the last 100 samples), traffic counters, session uptime, and build/version. The smart-invert toggle wraps the `TerminalContainer` in a `ColorFiltered` widget with an `invert + hue-rotate(180°)` matrix so white↔black flip while red/green/yellow/blue highlights stay recognisably the same colour. The filter is scoped to the terminal subtree only — the appBar and keyboard stay dark regardless of mode. |
 | `lib/screens/ping_native.dart` | Native `HttpClient`-based relay HTTP ping (replaces `wss://` → `https://` and tries `GET /`). |
 | `lib/screens/ping_web.dart` | Web reachability probe. Calls `window.fetch` (via `dart:js_interop`) against the relay's `/health` endpoint and returns `true` on a 2xx. The relay must serve `Access-Control-Allow-Origin: *` on `/health` (it does — see `backend/relay/src/main.rs`) and the PWA's CSP `connect-src` must whitelist the relay's https origin. Selected over `ping_native.dart` via conditional import on `dart.library.js_interop`. |
 | `lib/services/crypto/native_crypto.dart` | The dispatcher. Conditional import: `native_crypto_web.dart` on web, `native_crypto_ffi.dart` on native. Exposes a single `NativeCrypto` static class so the rest of the app doesn't care which platform it's on. |
@@ -207,15 +207,15 @@ Other hardening in the same change set:
 | `lib/services/websocket/ws_connect.dart` | Native WebSocket connect using `dart:io` `WebSocket` (no SSL cert override anymore — relay has a real cert). |
 | `lib/services/websocket/ws_connect_web.dart` | Web WebSocket connect using `WebSocketChannel.connect`. Conditional-imported. |
 | `lib/services/websocket/message_codec.dart` | JSON encode/decode helpers for the message envelopes. |
-| `lib/services/terminal/terminal_service.dart` | Glues `xterm.dart` to the WS service. Local echo prediction (echoes printable keystrokes immediately, suppresses the duplicate when the server replays them), 50ms keystroke batching, ring-buffer sync request after reconnect, plain-text fallback when crypto isn't established. |
+| `lib/services/terminal/terminal_service.dart` | Glues `xterm.dart` to the WS service. Local echo prediction (echoes printable keystrokes immediately, suppresses the duplicate when the server replays them), 50ms keystroke batching, ring-buffer sync request after reconnect, plain-text fallback when crypto isn't established. Also defines `TerminalStats`: a rolling-window (default 100 samples) counter of keystroke round-trip latencies plus cumulative bytes-sent / bytes-received / message counters and session-start timestamp. RTT is measured by hooking the local-echo predictor: each `_EchoEntry` carries the predicted-at timestamp, and when the matching byte arrives back from the server we feed `now - sentTimeMs` into the rolling buffer. This gives a true end-to-end keystroke latency measurement. The stats are surfaced to the user by the `_StatsDialog` in `terminal_screen.dart`. |
 | `lib/widgets/terminal/terminal_container.dart` | xterm wrapper with pinch zoom (2-pointer gesture), drag-to-select, double-tap word capture. |
-| `lib/widgets/terminal/connection_indicator.dart` | Top-bar dot showing relay/agent status. |
+| `lib/widgets/terminal/connection_indicator.dart` | Two related widgets sharing one `statusColor(status, relayReachable)` helper: `ConnectionIndicator` is an 8×8 coloured dot, and `KttyTitle` is the word **KTTY** rendered in the same colour. The previous "Connected" / "Disconnected" text label was removed because it overlapped the font-size +/- buttons on a 360-dp portrait phone — the colour-coded title now carries the status instead. Red = disconnected, orange = connecting, yellow = handshake/sync, blue = relay reachable but idle, green = fully connected. |
 | `lib/widgets/terminal/selection_handles.dart` | Android-style teardrop selection handles overlay with a Copy button. |
 | `lib/widgets/keyboard/custom_keyboard.dart` | The on-screen keyboard. Three layers (ABC, 123, SYM) plus a swipe drawer for arrows/function keys. Sends keys via a callback to `terminal_service`. |
 | `lib/widgets/keyboard/keyboard_layer.dart` | One layer of the keyboard — renders rows of keys. |
 | `lib/widgets/keyboard/key_button.dart` | Single key — handles tap, long-press, swipe, mic (for speech-to-text on Space). |
 | `lib/widgets/keyboard/key_definitions.dart` | The actual key layouts for ABC/123/SYM and the function-key drawer. |
-| `lib/widgets/keyboard/control_cluster.dart` | Top row of the in-app keyboard: `Esc Tab Ctrl CAPS ↑ ↓ ← → ⌨`. The single `CAPS` key replaces the previous `ab`/`Aa` pair (one-shot shift is still available via the up-arrow on the qwerty bottom row). The keyboard-hide icon at the right end is a duplicate of the appBar's keyboard toggle, kept here for thumb-reachability. |
+| `lib/widgets/keyboard/control_cluster.dart` | Top row of the in-app keyboard: `Tab Esc Ctrl CAPS ↑ ↓ ← → ⌨`. (Tab and Esc are in this order — Tab gets the leftmost slot because it's the more common key.) The single `CAPS` key replaces the previous `ab`/`Aa` pair (one-shot shift is still available via the up-arrow on the qwerty bottom row). The keyboard-hide icon at the right end is a duplicate of the appBar's keyboard toggle, kept here for thumb-reachability. |
 | `lib/widgets/clipboard/clipboard_buttons.dart` | Copy + Paste icon buttons in the keyboard toolbar row. Paste sends text via `sendText` directly (not as fake keystrokes). The previous Mark Start / Mark End buttons (which toggled an explicit selection mode) are gone — xterm's drag-to-select gives the same selection workflow with no extra UI. |
 | `lib/mock/mock_ws_server.dart` | In-process mock relay for unit tests. |
 
@@ -820,7 +820,57 @@ and black exactly maps to white; saturated reds/greens/blues
 shift slightly in luminance but remain unambiguously their original
 hue.
 
-### Phase 10 — picking up where this left off
+### Phase 10 — header de-clash, status-coloured title, stats popup, Tab/Esc swap
+
+Three independent UI changes that all landed in the same commit
+(`da51c1ed2`):
+
+1. **Header overlap fix.** On a 360-dp portrait phone the font-size
+   +/- buttons in the appBar were overlapping the long
+   "Connected" / "Disconnected" text label that lived next to the
+   KTTY title. Two changes resolved this without losing any
+   information:
+   - Removed the text label entirely from `ConnectionIndicator`. It
+     is now just an 8×8 colour dot.
+   - Made the `KTTY` title text *itself* carry the connection
+     status, by colouring it with the same `statusColor()` helper
+     the dot uses (red disconnected → orange connecting → yellow
+     handshake/sync → blue relay reachable → green connected). Two
+     widgets, `ConnectionIndicator` and the new `KttyTitle`, both
+     live in `lib/widgets/terminal/connection_indicator.dart`.
+   - The KTTY logo image moved out of the title row into the
+     AppBar's `leading:` slot so the title sits flush left, freeing
+     a few extra pixels of action-row real estate.
+
+2. **Session stats popup.** Added an `Icons.info_outline` button to
+   the appBar between the smart-invert toggle and the disconnect
+   button. Tapping it opens `_StatsDialog`, a modal that ticks once
+   a second and shows live keystroke RTT (last/avg/min/max over the
+   last 100 samples), traffic counters (bytes + messages), and
+   session metadata (status, uptime, build, version).
+
+   The latency tracking is finally correct. The previous code in
+   `terminal_service.dart` had a `_pendingTimestamps` map that tried
+   to correlate by sequence number, but the agent's outgoing seq
+   numbers don't line up with the client's input seq numbers, so
+   it was effectively measuring noise. The new approach hooks into
+   the existing local-echo predictor: each `_EchoEntry` carries the
+   timestamp at which we predicted the echo, and when the matching
+   byte arrives back from the server we feed `now - sentTimeMs`
+   into the rolling buffer. This is true end-to-end latency from
+   the moment the user presses a key to the moment that exact byte
+   echoes back through `flutter → relay → agent → bash → agent →
+   relay → flutter`. Caveat: only printable ASCII (0x20–0x7E) is
+   measured because only those bytes pass through the local-echo
+   predictor; control sequences like Tab/Esc/arrows are not
+   timed.
+
+3. **Tab/Esc swap in the control cluster.** Per the user's
+   preference, Tab gets the leftmost slot in the control cluster
+   row because it's the more common key. New row:
+   `Tab Esc Ctrl CAPS ↑ ↓ ← → ⌨`.
+
+### Phase 11 — picking up where this left off
 
 Future work is in the [Outstanding work](#outstanding-work--known-limitations)
 section below. The two big-ticket items are an HKDF-based key separation

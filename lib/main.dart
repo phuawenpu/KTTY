@@ -14,8 +14,8 @@ void main() async {
     await RustLib.init();
   }
 
-  // Block app if crypto is not available
-  if (!NativeCrypto.isCryptoAvailable) {
+  // Block app if crypto is not available (web WASM check only)
+  if (kIsWeb && !NativeCrypto.isCryptoAvailable) {
     runApp(const _CryptoErrorApp());
     return;
   }

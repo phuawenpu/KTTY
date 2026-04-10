@@ -158,16 +158,16 @@ class _TerminalScreenState extends State<TerminalScreen> {
           title: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Image.asset('assets/ktty_logo.png', height: 22),
+              Image.asset('assets/ktty_logo.png', height: 18),
+              const SizedBox(width: 4),
+              const Text('KTTY', style: TextStyle(fontSize: 13)),
               const SizedBox(width: 6),
-              const Text('KTTY'),
-              const SizedBox(width: 8),
               const ConnectionIndicator(),
             ],
           ),
           backgroundColor: const Color(0xFF16213E),
           toolbarHeight: 32,
-          titleTextStyle: const TextStyle(fontSize: 17),
+          titleTextStyle: const TextStyle(fontSize: 13),
           actions: [
             // Font size controls
             _buildHeaderButton(Icons.remove, () {

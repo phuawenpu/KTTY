@@ -91,15 +91,13 @@ class _CustomKeyboardState extends State<CustomKeyboard>
             children: [
               ControlCluster(
                 ctrlActive: ks.ctrlActive,
-                shiftActive: ks.shiftActive,
                 capsLock: ks.capsLock,
                 onCtrlToggle: () =>
                     context.read<KeyboardState>().toggleCtrl(),
-                onShiftToggle: () =>
-                    context.read<KeyboardState>().toggleShift(),
                 onCapsLockToggle: () =>
                     context.read<KeyboardState>().toggleCapsLock(),
                 onKeyPressed: (v) => _onKeyPressed(context, v),
+                onHideKeyboard: widget.onHideKeyboard,
               ),
               // Toolbar: ABC label + Bksp + Del + clipboard icons
               _buildToolbar(context),
@@ -392,21 +390,7 @@ class _CustomKeyboardState extends State<CustomKeyboard>
                 ),
               ),
             ),
-            // Hide keyboard button
-            if (widget.onHideKeyboard != null)
-              GestureDetector(
-                onTap: widget.onHideKeyboard,
-                child: Container(
-                  margin: const EdgeInsets.symmetric(horizontal: 4),
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: 6, vertical: 4),
-                  child: const Icon(
-                    Icons.keyboard_hide,
-                    color: Colors.white38,
-                    size: 18,
-                  ),
-                ),
-              ),
+            // (Keyboard-hide button moved up to the control cluster row.)
             const Spacer(),
             // Backspace
             _buildToolbarButton(

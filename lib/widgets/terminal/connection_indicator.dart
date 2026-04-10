@@ -47,17 +47,17 @@ class ConnectionIndicator extends StatelessWidget {
       mainAxisSize: MainAxisSize.min,
       children: [
         Container(
-          width: 8,
-          height: 8,
+          width: 6,
+          height: 6,
           decoration: BoxDecoration(
             color: color,
             shape: BoxShape.circle,
           ),
         ),
-        const SizedBox(width: 4),
+        const SizedBox(width: 3),
         Text(
           label,
-          style: TextStyle(color: color, fontSize: 13),
+          style: TextStyle(color: color, fontSize: 10),
         ),
       ],
     );

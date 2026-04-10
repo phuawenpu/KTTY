@@ -74,10 +74,15 @@ is fully untrusted. Concretely:
 - An attacker with the published APK or PWA build trying to find baked-in
   secrets — there are none. Both client and server compute the room id and
   session key from the user's PIN; nothing is shipped in the binaries.
-- A web XSS or hostile browser extension trying to call into the WASM
-  crypto via `window._kttyCrypto` — the global is wrapped in
-  `Object.freeze`, the page ships a strict CSP (`default-src 'self'`),
-  and `wasm-unsafe-eval` is the only relaxation.
+- A web XSS that tries to inject its own scripts — the page ships a
+  strict CSP (`default-src 'self'`, `script-src 'self' 'wasm-unsafe-eval'
+  https://www.gstatic.com`, no `'unsafe-inline'`), so any inline `<script>`
+  the attacker tries to inject is silently dropped by the browser. The
+  WASM crypto is loaded from a same-origin file (`wasm-loader.js`), not
+  inlined. Note: `window._kttyCrypto` is *not* deleted after Flutter
+  boots — once the page is open, any code already running on the same
+  origin (browser extensions, bookmarklets) can still call into the
+  crypto module. The CSP is the real boundary, not the global.
 - A bored user typing `ws://` instead of `wss://` — the dashboard URL
   field rejects anything that isn't `wss://`, and the Android manifest
   has `usesCleartextTraffic="false"` so the OS rejects it too.
@@ -132,11 +137,17 @@ flagged five real issues, all now fixed in commit history (see
 - **Cleartext WebSocket allowed on Android** (`usesCleartextTraffic=true`)
   + the Flutter dashboard accepted `ws://`. **Fix:** manifest set to
   `false`, dashboard rejects any URL that doesn't start with `wss://`.
-- **`window._kttyCrypto` reachable to any script on the PWA origin and no
-  CSP.** **Fix:** strict `<meta>` CSP (`default-src 'self'`,
-  `script-src 'self' 'wasm-unsafe-eval'`, `connect-src 'self' wss://*.fly.dev`,
-  `frame-ancestors 'none'`), and the global is wrapped with
-  `Object.freeze` so its methods can't be hot-swapped.
+- **PWA had no CSP** — any third-party script could reach the WASM
+  crypto exposed on `window._kttyCrypto`. **Fix:** strict `<meta>` CSP
+  (`default-src 'self'`, `script-src 'self' 'wasm-unsafe-eval' https://www.gstatic.com`,
+  `connect-src 'self' https://www.gstatic.com https://fonts.gstatic.com wss://ktty-relay.fly.dev wss://*.fly.dev`,
+  `frame-ancestors 'none'`, no `'unsafe-inline'` for scripts). The
+  gstatic whitelist is required because Flutter web's canvaskit
+  renderer dynamically imports `canvaskit.js` and `canvaskit.wasm`
+  from `https://www.gstatic.com/flutter-canvaskit/<engineRevision>/`.
+  Because the CSP rejects inline scripts, the WASM crypto loader was
+  also moved out of `index.html` into a same-origin
+  [`web/wasm-loader.js`](web/wasm-loader.js) module.
 
 Other hardening in the same change set:
 - Build artifacts (`*.so`, `*.wasm`) are now built with
@@ -273,7 +284,8 @@ in `backend/common/`, `backend/ffi-crypto/`, or `backend/wasm-crypto/`.
 
 | Path | Purpose |
 |---|---|
-| `web/index.html` | Loads `wasm/ktty_wasm_crypto.js` *before* Flutter, calls `init()`, stamps the exported functions onto `window._kttyCrypto`, and sets `window._kttyCryptoReady = true`. The Flutter `native_crypto_web.dart` reads that flag to decide whether to launch or show the crypto-error screen. |
+| `web/index.html` | Page shell. Holds the strict CSP `<meta>` tag and loads `wasm-loader.js` *before* `flutter_bootstrap.js`. Does not contain any inline scripts (the CSP doesn't permit them). |
+| `web/wasm-loader.js` | External WASM loader. Imports `./wasm/ktty_wasm_crypto.js`, calls `init()`, then assigns the module namespace object directly to `window._kttyCrypto` and sets `window._kttyCryptoReady = true`. The `await init()` is at the **top level of an ES module** — that's the load-bearing detail, because top-level await blocks any subsequent `<script>` tag from running, so Flutter's `flutter_bootstrap.js` can't start until the WASM bindings are in place. Without that ordering, Flutter's `main.dart` would call `NativeCrypto.deriveKey` against an empty `window._kttyCrypto` and the resulting key would not match the agent's room id (the user-visible symptom is "Wrong PIN"). This file lives outside `index.html` because the CSP forbids inline scripts. |
 | `web/manifest.json` | PWA manifest (name, icons, theme, display mode). |
 | `web/favicon.png`, `web/icons/Icon-*.png` | App icons (192/512 plus maskable). |
 
@@ -414,6 +426,12 @@ cd backend
 fly deploy
 ```
 
+`backend/Dockerfile` is set up to copy `common/`, `relay/`, `agent/`, and
+`ffi-crypto/` into the build context. The relay binary doesn't actually
+depend on `ffi-crypto`, but cargo refuses to load the workspace without
+it because it's a workspace member. If you ever add another workspace
+member, add a `COPY` line for it too.
+
 To run a relay locally for development:
 
 ```bash
@@ -466,18 +484,31 @@ the workspace) by `./build-agent.sh`.
 
 ## Deploying the PWA to GitHub Pages
 
+The recommended pattern uses a `git worktree` so you don't have to nuke
+the working tree of the `main` branch:
+
 ```bash
+# 1. Build with the right base href
 flutter build web --release \
     --base-href "/KTTY/" \
     --dart-define="BUILD_TIME=$(date -u +'%Y-%m-%d %H:%M UTC')"
-# Push build/web to a `gh-pages` branch:
-cd build/web
-git init
-git add .
+
+# 2. Fetch the existing gh-pages branch and check it out into a worktree
+git fetch origin gh-pages:gh-pages
+git worktree add /tmp/ktty-gh-pages gh-pages
+
+# 3. Replace its contents with the fresh build, commit, push
+cd /tmp/ktty-gh-pages
+find . -maxdepth 1 -mindepth 1 -not -name '.git' -exec rm -rf {} +
+cp -r /path/to/repo/build/web/. .
+git add -A
 git commit -m "Deploy PWA"
-git branch -M gh-pages
-git remote add origin https://github.com/phuawenpu/KTTY.git
-git push -f origin gh-pages
+git push origin gh-pages
+
+# 4. Cleanup
+cd -
+git worktree remove /tmp/ktty-gh-pages --force
+git branch -D gh-pages   # optional — keeps your local branch list tidy
 ```
 
 Then enable GitHub Pages in repo settings → Pages → branch `gh-pages` → root.
@@ -485,6 +516,10 @@ Then enable GitHub Pages in repo settings → Pages → branch `gh-pages` → ro
 The `--base-href "/KTTY/"` is critical because the site lives at
 `phuawenpu.github.io/KTTY/`, not at the domain root. Without it, the app
 will 404 on its own assets.
+
+After deploying, hard-reload (Ctrl+Shift+R) once on every device that has
+the old PWA cached, or unregister the service worker manually — Flutter's
+service worker aggressively caches `main.dart.js` and `index.html`.
 
 ---
 
@@ -496,6 +531,9 @@ will 404 on its own assets.
 | `PIN must be at least 8 digits` | You typed a PIN shorter than 8. | Use a longer PIN. The minimum is enforced on both agent and Flutter; see threat model. |
 | `Relay URL must use wss://` | You typed `ws://` in the dashboard URL field. | Use `wss://`. Cleartext is rejected because it lets a network attacker observe your room id (PIN-derived material). |
 | `Auth token mismatch from peer` in relay logs | A client sent a text message without including the auth token the relay handed back at join time, OR with the wrong token. With the v2 fix this can also indicate that you're running a *new* relay against an *old* agent/client that doesn't include `auth` on handshake messages. | Rebuild and redeploy both ends from the same commit. |
+| PWA shows **"Crypto Module Unavailable"** | The WASM loader didn't run. Most common causes: (a) `web/wasm-loader.js` is missing from the deployed `gh-pages` branch — check `curl -I https://phuawenpu.github.io/KTTY/wasm-loader.js`. (b) The CSP in `web/index.html` is blocking `wasm-loader.js` (e.g. you removed `'self'` from `script-src`). (c) `web/wasm/ktty_wasm_crypto.{js,wasm}` is missing — re-run `./build-crypto.sh`. (d) Browser cached the old service worker — hard-reload (Ctrl+Shift+R). | Verify the loader file is reachable, the CSP allows `'self'` for scripts, and `web/wasm/` is populated. Rebuild with `flutter build web --release --base-href "/KTTY/"`. |
+| PWA shows **"Wrong PIN"** even with the correct PIN | Either the PWA was built without the load-order fix and is racing the WASM init, OR you're testing against an agent built before the auth-token-on-handshake change. | Confirm `web/wasm-loader.js` uses **top-level `await init()`** (not a fire-and-forget IIFE). Confirm the agent binary was built from commit `8715ffe42` or later (run `--version` if you've added one, or just rebuild). |
+| PWA loads but shows blank page | CSP is blocking Flutter's canvaskit renderer. The `script-src` and `connect-src` directives must include `https://www.gstatic.com`, and `font-src` should include `https://fonts.gstatic.com`. | Use the CSP from the current `web/index.html` as a reference. Don't tighten `script-src` to `'self'` only — canvaskit lives on gstatic. |
 | `dart:ffi`: `Failed to load dynamic library "libktty_ffi_crypto.so"` | The cdylib wasn't bundled into the APK for the device's ABI. | Run `./build-crypto.sh` to repopulate `android/app/src/main/jniLibs/` for all 4 ABIs, then rebuild the APK. Confirm with `unzip -l app-release.apk \| grep libktty`. |
 | PWA stuck on the "Crypto Module Unavailable" screen | `web/wasm/ktty_wasm_crypto.{js,wasm}` missing or corrupted. | Run `./build-crypto.sh` (wasm-pack section), confirm the files exist, hard-reload the browser to dump the service worker cache. |
 | `flutter pub get` complains about `ktty_bridge` | An old `pubspec.yaml` from before the Rust-FFI removal. | The current `pubspec.yaml` has no `ktty_bridge` dep. Check you're on a clean `main`. |
@@ -635,16 +673,84 @@ found five real issues. All fixed in commit `8715ffe42`:
    → manifest set `usesCleartextTraffic="false"`, dashboard rejects any
    URL not starting with `wss://`. Minimum PIN length 8 enforced on
    both ends to make offline cracking of the room id infeasible.
-5. **PWA had no CSP and `window._kttyCrypto` was a wide-open hot-swap
-   target** → strict CSP `<meta>` tag, `Object.freeze` on the global,
+5. **PWA had no CSP** — any third-party script could reach the WASM
+   crypto on `window._kttyCrypto`. Added a strict `<meta>` CSP tag,
    `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`.
+   The first cut also wrapped the global with `Object.freeze` and used
+   a fire-and-forget IIFE to load the WASM — both turned out to be
+   bugs (see Phase 5).
 
 Plus build hardening: `build-crypto.sh` sets `RUSTFLAGS=--remap-path-prefix=...`
 so committed `.so`/`.wasm` artifacts no longer leak the developer's home
 directory. `.gitignore` defensively blocks common secret filenames so a
 future `git add -A` can't accidentally publish a `.env` or keystore.
 
-### Phase 5 — picking up where this left off
+### Phase 5 — PWA fallout fix-ups (commits `6f727b3cd`, `dcdf8b3db`, `775a6954c`)
+
+Phase 4 broke the PWA in three different ways. Each had to be debugged
+in turn against the live deployment, because none of them showed up
+in the local `flutter build web` (the build always succeeded — it was
+runtime behaviour that was wrong).
+
+1. **WASM load order race** (`6f727b3cd`). The original `index.html`
+   used top-level `await loadCrypto()`, which blocks subsequent
+   `<script>` tags from running. The Phase 4 rewrite replaced it with
+   a fire-and-forget `(async () => { ... })()` IIFE. That meant
+   `flutter_bootstrap.js` could (and did) start running before the
+   WASM module had bound itself onto `window._kttyCrypto`. When
+   Flutter's `main.dart` called `NativeCrypto.deriveKey` during the
+   race window, it got back garbage — the agent and PWA computed
+   different room ids and the user saw "Wrong PIN" with a correct
+   PIN. Restored the top-level `await` pattern. Also dropped the
+   `Object.freeze` wrapper at the same time — copying wasm-bindgen
+   exports onto a wrapper object can produce subtly wrong behaviour
+   because the bindings rely on the module-namespace identity.
+2. **CSP blocked Flutter's canvaskit renderer** (also `6f727b3cd`).
+   Flutter web's canvaskit renderer dynamically imports
+   `canvaskit.js` and fetches `canvaskit.wasm` from
+   `https://www.gstatic.com/flutter-canvaskit/<engineRevision>/`,
+   and may fall back to fonts on `https://fonts.gstatic.com`. The
+   original CSP had `'self'` only — both blocked. Whitelisted
+   `https://www.gstatic.com` in `script-src`/`connect-src` and
+   `https://fonts.gstatic.com` in `font-src`. Added `blob:` to
+   `worker-src` for canvaskit's web worker.
+3. **CSP blocked the inline WASM loader** (`775a6954c`). Even with
+   the gstatic whitelist and the load-order fix, the live PWA still
+   showed "Crypto Module Unavailable". Reason: the WASM loader was an
+   inline `<script type="module">` block. The CSP has no
+   `'unsafe-inline'` for `script-src`, so the browser silently
+   refused to execute it. Moved the loader into a same-origin
+   `web/wasm-loader.js` file (covered by `'self'`) and reference it
+   from `index.html`. This is the file structure now.
+
+Plus a Dockerfile fix in `dcdf8b3db`: the relay's Dockerfile only
+copied `common/`, `relay/`, and `agent/` into the build context, but
+the workspace now declares `ffi-crypto/` as a member, so cargo failed
+to load the workspace at all. Added `COPY ffi-crypto/ ./ffi-crypto/`
+to the Dockerfile. The relay binary doesn't depend on `ffi-crypto`,
+but cargo needs the manifest present.
+
+### Phase 6 — public deployment (live as of this writing)
+
+- Relay redeployed via `flyctl deploy` from `backend/` to
+  `ktty-relay.fly.dev`. Image
+  `registry.fly.io/ktty-relay:deployment-01KNV63BZPQ2C3F266FD60SNDT`,
+  26 MB. Health check live: `curl https://ktty-relay.fly.dev/health`
+  returns `{"status":"ok"}`. This deployment has the CSPRNG auth
+  tokens, no message-type exemptions, bounded channels, 64 KB frame
+  cap, and the trimmed `/health` endpoint.
+- PWA redeployed to GitHub Pages. The `gh-pages` branch holds the
+  output of `flutter build web --release --base-href "/KTTY/"` plus
+  the `wasm-loader.js` and the rebuilt WASM. Live at
+  https://phuawenpu.github.io/KTTY/.
+- The root `main` branch has all source changes committed. The
+  repo's `tests/mlkem_interop/` test passes.
+- The agent binary at `backend/target/release/ktty-agent` is the
+  build that includes the auth-token-on-handshake change. Run it
+  with `--relay-url wss://ktty-relay.fly.dev/ws` (or set the
+  `KTTY_RELAY_URL` env var). Use a PIN of 8 or more digits.
+
+### Phase 7 — picking up where this left off
 
 Future work is in the [Outstanding work](#outstanding-work--known-limitations)
 section below. The two big-ticket items are an HKDF-based key separation

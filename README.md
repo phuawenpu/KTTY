@@ -982,37 +982,423 @@ rather than security boundaries. Tackle them in a future v3 commit:
 
 ### Polish
 
-- **Document non-overlap requirement on `ktty_mlkem_encapsulate`
-  (audit L5).** Current callers always allocate three distinct buffers
-  via `calloc`, so the `copy_nonoverlapping` is sound — but the C ABI
-  contract isn't documented. Add a `# Safety` clause to
-  `backend/ffi-crypto/src/lib.rs`.
+Each entry below is sized to be picked up cold next session — the
+goal, the files to touch, the steps, and the verification are all
+written out so you don't have to reconstruct context.
 
-- **Add a `SECURITY.md` with disclosure contact.** For a public crypto
-  repo this is table stakes. Should also link to this README's threat
-  model section.
+#### 6. Document non-overlap requirement on `ktty_mlkem_encapsulate` (audit L5)
 
-- **Drop `window._kttyCrypto` after Flutter has booted (audit H3
-  follow-up).** Right now we expose it to the page for the lifetime of
-  the session because the Flutter JS interop holds an indirect reference
-  through bound externs. Investigate whether we can `delete
-  window._kttyCrypto` once `runApp` has executed. The closure-bound JS
-  interop bindings should keep working after the global is gone.
+**Goal:** Make the C-ABI contract for the FFI crypto entry-point
+explicit so a future caller can't accidentally introduce undefined
+behaviour.
 
-- **Constants drift detection.** The Argon2 parameters in
-  `backend/common/src/constants.rs` and the literal values in
-  `lib/services/crypto/native_crypto_ffi.dart` are duplicated. Add a
-  `cargo test` or build-time check that fails if they ever diverge.
+**Why it matters:** The function uses `std::ptr::copy_nonoverlapping`
+to write the ciphertext and shared secret outputs. If a caller ever
+passes overlapping pointers (e.g. the ek input and the ct output
+sharing memory), it's instant UB. Today's callers — `dart:ffi` on
+Android via three distinct `calloc` allocations and the WASM build
+— always pass disjoint buffers, so it's sound, but the contract
+isn't written down anywhere.
 
-- **Tracked lockfiles for the test crates.** `tests/mlkem_interop/dart_test/pubspec.lock`
-  and `tests/mlkem_interop/rust_baseline/Cargo.lock` are gitignored —
-  for bin crates the lock files should be committed for reproducibility.
+**Files:** `backend/ffi-crypto/src/lib.rs`
 
-- **Repo layout cleanup.** The repo root currently doubles as the
-  developer's project home (it contains `flutter/`, `android-sdk/`,
-  `.cargo/`, `.npm-global/`, etc., all gitignored). One bad
-  `git clean -fdx` would nuke all of those. Move the toolchains one
-  directory up so the git repo is a proper subdirectory.
+**Steps:**
+1. Add a `# Safety` doc-comment block above the existing comment on
+   `ktty_mlkem_encapsulate`. Required guarantees:
+   - `ek` points to ≥ 1184 readable bytes
+   - `ct_out` points to ≥ 1088 writable bytes
+   - `ss_out` points to ≥ 32 writable bytes
+   - **All three regions are pairwise non-overlapping**
+   - All three pointers are valid for the duration of the call
+2. While you're in the file, also document `ktty_ffi_crypto_version`
+   as `# Safety: none — pure read-only constant return`.
+3. Optionally add a debug-only `debug_assert!` that the input slice
+   length is exactly 1184 (currently it's hard-coded via
+   `from_raw_parts(ek, 1184)`).
+
+**Verify:** `cargo build -p ktty-ffi-crypto`. Then re-run
+`./build-crypto.sh` to refresh the committed `.so` files (the
+behavior is unchanged, but the fingerprint will differ). Run
+`cargo test -p ktty-common` to make sure nothing else regressed.
+
+---
+
+#### 7. Add a `SECURITY.md` with a disclosure contact
+
+**Goal:** Make it possible for a security researcher who finds a
+vulnerability in KTTY to report it to you privately instead of
+opening a public GitHub issue.
+
+**Files:** new file `SECURITY.md` at the repo root.
+
+**Steps:**
+1. Create `SECURITY.md` with these sections:
+   - **Supported versions** — single line: only the `main` branch is
+     supported.
+   - **Reporting a vulnerability** — give an email address (or a
+     GitHub Security Advisory link, see
+     `https://github.com/phuawenpu/KTTY/security/advisories/new`)
+     and ask for 7 days before disclosure.
+   - **Threat model** — link to the existing "Threat model" section
+     of `README.md`.
+   - **Out of scope** — list things that are explicitly *not* bugs:
+     short PINs are crackable offline, the relay can drop traffic,
+     malicious clients with a valid PIN can do anything bash allows,
+     etc. Pull bullets straight from the README's "NOT protected
+     against" list.
+2. In `README.md`, add a one-line link from the "Threat model"
+   section to `SECURITY.md`.
+3. Enable the GitHub Security Advisories feature on the repo
+   (Settings → Security → Advisories → Enable).
+
+**Verify:** Open `SECURITY.md` on the GitHub web UI; you should
+see a "Report a vulnerability" button appear automatically.
+
+---
+
+#### 8. Drop `window._kttyCrypto` after Flutter has booted (audit H3 follow-up)
+
+**Goal:** Reduce the attack surface of the WASM crypto exposed to
+the page. Today the global lives forever; ideally it's only present
+during Flutter's initialisation and is removed once `runApp()` has
+executed, leaving any future XSS / extension code with no global
+to grab.
+
+**Why it's tricky:** The Flutter JS interop bindings in
+`lib/services/crypto/native_crypto_web.dart` use
+`@JS('window._kttyCrypto.deriveKey')` etc. — those annotations are
+parsed by `dart:js_interop`. It's not documented whether the
+binding is *captured* at module-eval time (in which case removing
+the global later is safe) or *resolved on every call* (in which case
+removing it would break the app the moment a key derivation
+happened).
+
+**Files:** `web/wasm-loader.js`, `lib/main.dart`,
+`lib/services/crypto/native_crypto_web.dart`.
+
+**Steps:**
+1. **Investigate first** — write a tiny test in the live PWA console
+   to see what happens. Open https://phuawenpu.github.io/KTTY/,
+   wait for the dashboard, then in DevTools console:
+   ```js
+   const saved = window._kttyCrypto;
+   delete window._kttyCrypto;
+   // Try to connect with a PIN — does deriveKey still work?
+   ```
+   If the connect flow still works with the global gone, the JS
+   interop is binding-time-captured and we're safe to delete it.
+   If it throws "TypeError: window._kttyCrypto is undefined", it's
+   resolving per-call and option (a) below applies.
+2. **Option (a) — bindings are per-call:** keep the global but stash
+   it on a non-enumerable Symbol property instead of a string key,
+   so an attacker who doesn't know the symbol can't reach it. Update
+   `native_crypto_web.dart` to use the symbol-based path.
+3. **Option (b) — bindings are capture-time:** add a one-shot
+   "Flutter is up" callback. The cleanest hook is in `lib/main.dart`
+   inside `runApp(...)`'s post-frame callback:
+   ```dart
+   if (kIsWeb) {
+     SchedulerBinding.instance.addPostFrameCallback((_) {
+       // After the first frame, the JS interop has captured what it
+       // needs from window._kttyCrypto. Delete the global so it's
+       // not reachable by extensions / XSS.
+       js_interop.callMethod('eval'.toJS, ['delete window._kttyCrypto;'.toJS]);
+     });
+   }
+   ```
+   (You'd need to import `dart:js_interop` for the JS-side
+   `delete`. The CSP allows `wasm-unsafe-eval` not `unsafe-eval`,
+   so you might need to do this from `wasm-loader.js` instead via a
+   `setTimeout` after Flutter signals readiness.)
+4. **Update README threat model.** Replace the current honest
+   admission ("`delete window._kttyCrypto` remains future work")
+   with the new shipped behaviour.
+
+**Verify:** Hard-reload the PWA, open DevTools console, type
+`window._kttyCrypto`. If it returns `undefined`, you're done. Then
+type a PIN and connect — the handshake must still succeed (the
+proof that the bindings were captured before the delete).
+
+---
+
+#### 9. Constants drift detection
+
+**Goal:** Make it impossible for the Argon2 / XChaCha20 / HMAC
+parameters to silently diverge between the Rust and Dart sides of
+the protocol. Today they're hard-coded literals in two places;
+nothing fails loudly if they get out of sync.
+
+**Files:** `backend/common/src/constants.rs`,
+`lib/services/crypto/native_crypto_ffi.dart`,
+`backend/wasm-crypto/src/lib.rs` (already pulls from common, so OK),
+new file `tests/constants_drift_test.dart` or extension to existing
+`backend/common/src/crypto.rs` tests.
+
+**Constants that must stay in sync:**
+- `STATIC_SALT` (string `"KTTY STATIC SALT VERSION 1"`)
+- `ARGON2_M_COST` (65536)
+- `ARGON2_T_COST` (3)
+- `ARGON2_P_COST` (4)
+- `ARGON2_OUTPUT_LEN` (32)
+- `NONCE_LEN` (24)
+- `MAC_LEN` (16)
+
+**Steps:**
+1. **Cleanest approach** — move the Dart-side constants out of
+   `native_crypto_ffi.dart` into a small `constants.dart` file in
+   `lib/services/crypto/`, then make a `cargo test` that reads
+   that file and parses the integer literals out, comparing them
+   to the Rust constants in `backend/common/src/constants.rs`.
+   Sketch:
+   ```rust
+   #[test]
+   fn dart_constants_match_rust() {
+       let dart = std::fs::read_to_string("../../lib/services/crypto/constants.dart").unwrap();
+       assert!(dart.contains(&format!("argon2MCost = {}", ARGON2_M_COST)));
+       assert!(dart.contains(&format!("argon2TCost = {}", ARGON2_T_COST)));
+       // ... and so on
+       assert!(dart.contains(&format!("staticSalt = '{}'", std::str::from_utf8(STATIC_SALT).unwrap())));
+   }
+   ```
+2. **Wire it into CI** — add `cargo test -p ktty-common` to any
+   CI configuration you ever set up. (No CI today; this becomes
+   a manual `cargo test` for now.)
+3. **Update both files** if any constant ever changes — bump the
+   `STATIC_SALT` version string ("KTTY STATIC SALT VERSION 2")
+   too, since changing parameters is effectively a key-derivation
+   wire-format change.
+
+**Verify:** Intentionally change one Dart constant by 1 and run
+`cargo test -p ktty-common` — it must fail. Revert and re-run; it
+must pass.
+
+**Caveat:** This is a string-grep test, not a real type check. A
+fancier version would generate the Dart constants file from the
+Rust constants at build time (e.g. via a build.rs script that
+writes `constants.dart` from a template). Worth considering if
+the constants ever multiply.
+
+---
+
+#### 10. Tracked lockfiles for the test crates
+
+**Goal:** Make `tests/mlkem_interop/` reproducible by committing
+its lockfiles. They're currently gitignored.
+
+**Files:** `tests/mlkem_interop/dart_test/pubspec.lock`,
+`tests/mlkem_interop/rust_baseline/Cargo.lock`, plus the relevant
+`.gitignore` entries.
+
+**Steps:**
+1. Check `tests/mlkem_interop/dart_test/.gitignore` — it has `pubspec.lock`
+   in it (from the standard Dart `.gitignore` template). For *bin*
+   crates the lock file should be committed; only *library* crates
+   should ignore it. The interop test is a bin crate, so:
+   ```bash
+   cd tests/mlkem_interop/dart_test
+   sed -i '/^pubspec.lock$/d' .gitignore  # remove the ignore
+   cd /home/pan/Code4/KTTY/workspace
+   dart pub get --directory tests/mlkem_interop/dart_test
+   git add tests/mlkem_interop/dart_test/.gitignore tests/mlkem_interop/dart_test/pubspec.lock
+   ```
+2. Same dance for the Rust baseline:
+   ```bash
+   cd tests/mlkem_interop/rust_baseline
+   # Cargo.lock is probably ignored at the repo-root .gitignore
+   # via the broad backend/target/ rule — verify with
+   git check-ignore -v tests/mlkem_interop/rust_baseline/Cargo.lock
+   # If it's ignored, add an explicit `!Cargo.lock` exception. If it's
+   # ignored only because the file doesn't exist yet, just:
+   cargo generate-lockfile  # or `cargo build --offline=false`
+   git add tests/mlkem_interop/rust_baseline/Cargo.lock
+   ```
+3. Commit with message
+   `tests: track interop lockfiles for reproducibility`.
+
+**Verify:** `git status` should show no untracked lockfiles in
+`tests/mlkem_interop/`. `cargo run -p rust_baseline` and
+`dart run tests/mlkem_interop/dart_test/bin/dart_test.dart` should
+both still work.
+
+---
+
+#### 11. Repo layout cleanup — move toolchains out of the repo root
+
+**Goal:** Stop the repo root from doubling as the developer's
+project home. Today `flutter/`, `android-sdk/`, `.cargo/`,
+`.rustup/`, `.npm-global/`, `.fly/`, `.config/`, etc. all live
+inside the repo (gitignored). One careless `git clean -fdx` would
+delete all of those.
+
+**Files:** the repo root `.gitignore` would shrink considerably,
+but no source files change. This is mostly a filesystem reorg.
+
+**Steps:**
+1. Make a new directory **outside** the repo:
+   ```bash
+   mkdir -p ~/Code4/KTTY-tools
+   ```
+2. Move the toolchains there:
+   ```bash
+   cd /home/pan/Code4/KTTY/workspace
+   for d in flutter android-sdk .cargo .rustup .npm-global .fly .config .cache; do
+     [ -e "$d" ] && mv "$d" ~/Code4/KTTY-tools/
+   done
+   ```
+3. Add `~/Code4/KTTY-tools/flutter/bin` etc. to your shell's PATH
+   (or symlink them into `~/.local/bin` / `/usr/local/bin`).
+4. Update the **Build environment expectations** table in `README.md`
+   to reflect the new paths.
+5. Strip the now-unused entries from `.gitignore`:
+   ```
+   flutter/
+   android-sdk/
+   .android/
+   .config/
+   .cache/
+   .cargo/
+   .rustup/
+   .npm/
+   .npm-global/
+   .fly/
+   .local/
+   ```
+6. Smoke-test by running `flutter pub get` and `cargo test -p
+   ktty-common` from the repo root with the new PATH — both must
+   still work.
+
+**Verify:** `ls -la /home/pan/Code4/KTTY/workspace` should show
+only source directories (`backend/`, `lib/`, `web/`, `android/`,
+`linux/`, `tests/`, etc.) plus the small top-level files
+(`README.md`, `pubspec.yaml`, etc.). No tooling directories.
+
+**Caveat:** This is a destructive-feeling operation even though
+it's just `mv`. Take a backup of the workspace first
+(`tar czf ~/ktty-backup.tar.gz workspace/`) so a rollback is one
+`tar xzf` away.
+
+---
+
+#### 12. Measure RTT for non-printable input (Tab/Esc/arrows)
+
+**Goal:** The session-stats popup currently only times keystrokes
+in the printable ASCII range (0x20–0x7E) because that's the only
+path that goes through the local-echo predictor. Tab, Esc, and
+the arrow keys take an unmeasured detour. Add a separate
+sequence-correlated path so the popup reflects *all* input
+latency, not just the printable subset.
+
+**Files:** `lib/services/terminal/terminal_service.dart`,
+`backend/agent/src/session.rs`.
+
+**Steps:**
+1. **Decide on the correlation key.** Options:
+   - **(a) per-message timestamps in the envelope** — add an
+     optional `client_send_ms` field to the `pty` envelope. The
+     agent ignores it; on the way back, the agent's PTY-output
+     envelope includes the *client* timestamp of the *last input*
+     it processed before this output, so the client can compute
+     RTT on receipt. This requires an agent change and a
+     wire-format extension (back-compat: old clients omit the
+     field, agent omits the echo, client gets no measurement —
+     graceful degrade).
+   - **(b) opaque correlation token** — client adds a 4-byte
+     `cid` field to each input envelope; agent echoes the most
+     recently received `cid` on its next output envelope. Same
+     idea, smaller wire impact, slightly fiddlier semantics.
+2. **Pick (a)**. It's simpler and the wire impact is one extra
+   integer field. Update `EncryptedEnvelope` in
+   `backend/common/src/messages.rs` to include `#[serde(skip_serializing_if = "Option::is_none")] pub client_send_ms: Option<i64>`.
+3. **Agent side** (`backend/agent/src/session.rs`): keep a
+   `last_client_send_ms: Option<i64>` field on the bridge state.
+   On every input envelope, update it. On every output envelope
+   the agent generates from PTY data, copy it through to the
+   outbound envelope's `client_send_ms` field, then clear the
+   stored value (or keep stamping until the next input arrives).
+4. **Client side** (`terminal_service.dart`): in `_sendPty`, set
+   `client_send_ms = DateTime.now().millisecondsSinceEpoch` on
+   the outbound envelope. In `_handleMessage` for `type == 'pty'`,
+   if the incoming envelope has `client_send_ms`, compute
+   `now - client_send_ms` and feed it to a *separate* stats bucket
+   (`stats.noteControlRtt(...)` or just merge with the existing
+   `noteRtt`).
+5. **Decide on bucketing.** Probably best to split: keep the
+   echo-based RTT as "round-trip from local-echo prediction" and
+   add a new "round-trip from input timestamp" metric in the
+   popup. They measure subtly different things.
+6. **Wire format version bump.** This is technically a wire change.
+   Bump `VERSION` in `backend/agent/src/main.rs` and `kAppVersion`
+   in `lib/config/constants.dart` together. Old clients against
+   new agents → field is ignored, no measurement. New clients
+   against old agents → field is sent and ignored, no
+   measurement. Graceful both ways.
+
+**Verify:** Connect, type a few normal keys, then press
+Tab/Esc/arrow several times. Open the stats popup. The Tab/Esc
+RTT should be in the same ballpark as the printable RTT (within
+the noise floor of one keystroke).
+
+**Caveat:** Clock skew between client and agent is irrelevant for
+RTT measurement because both timestamps come from the *client*
+clock. As long as Dart's `DateTime.now()` is monotonic, this works.
+
+---
+
+#### 13. Persist smart-invert toggle and stats across app restarts
+
+**Goal:** The smart-invert (light/dark) terminal toggle currently
+resets to dark on every app launch. Some users will want sticky
+preferences. Same for the session-stats baseline — currently the
+rolling RTT buffer is in-memory only and clears on disconnect.
+
+**Files:** `pubspec.yaml`, `lib/state/session_state.dart` (or new
+file), `lib/screens/terminal_screen.dart`.
+
+**Steps:**
+1. Add `shared_preferences: ^2.3.0` (or current latest) to the
+   `dependencies` block of `pubspec.yaml`. Run `flutter pub get`.
+2. Create or extend a settings holder. Simplest: add to the
+   existing `SessionState` change-notifier in `lib/state/session_state.dart`:
+   ```dart
+   bool _invertedTheme = false;
+   bool get invertedTheme => _invertedTheme;
+   Future<void> setInvertedTheme(bool v) async {
+     _invertedTheme = v;
+     notifyListeners();
+     final prefs = await SharedPreferences.getInstance();
+     await prefs.setBool('invertedTheme', v);
+   }
+   Future<void> loadSettings() async {
+     final prefs = await SharedPreferences.getInstance();
+     _invertedTheme = prefs.getBool('invertedTheme') ?? false;
+     notifyListeners();
+   }
+   ```
+3. In `lib/main.dart`, call `await SessionState.loadSettings()` (or
+   make it part of the constructor) before `runApp` so the initial
+   state is correct on the first frame.
+4. In `lib/screens/terminal_screen.dart`, replace the local
+   `_invertedTheme` boolean with `context.watch<SessionState>().invertedTheme`,
+   and replace `_toggleInvert` with
+   `context.read<SessionState>().setInvertedTheme(!current)`.
+5. Drop the now-unused local field and method.
+
+**Stats persistence (optional second step):** if you also want
+the latency stats to survive app restarts (so you can see "average
+over the last 100 keystrokes" across multiple sessions), serialise
+the `_rttSamples` list into prefs on each `noteRtt` call. Be
+careful with frequency — write at most once per N seconds via a
+debounce timer, not on every keystroke, or you'll thrash the
+SharedPreferences disk file.
+
+**Verify:** Toggle smart-invert, kill the app, relaunch. The
+toggle should still be in the previous state. Same for stats if
+you implemented that part.
+
+**Caveat:** `SharedPreferences` isn't encrypted. Don't ever stash
+the user's PIN there — only UI preferences and non-sensitive
+metrics. The PIN is already correctly held only in `_lastPin` in
+`websocket_service.dart`, in memory, and zeroed on disconnect.
 
 ---
 

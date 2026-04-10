@@ -1,12 +1,9 @@
-import 'dart:convert';
-import 'dart:typed_data';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import '../config/constants.dart';
 import '../models/connection_state.dart';
-import '../services/crypto/native_crypto.dart';
 import '../services/websocket/websocket_service.dart';
 import '../services/terminal/terminal_service.dart';
 import '../state/session_state.dart';
@@ -157,15 +154,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
     return _lockoutUntil!.difference(DateTime.now()).inSeconds.clamp(0, 999);
   }
 
-  List<int> _hexDecode(String hex) {
-    hex = hex.replaceAll(RegExp(r'\s'), '');
-    final bytes = <int>[];
-    for (var i = 0; i + 1 < hex.length; i += 2) {
-      bytes.add(int.parse(hex.substring(i, i + 2), radix: 16));
-    }
-    return bytes;
-  }
-
   Future<void> _connect() async {
     final session = context.read<SessionState>();
     final pin = _pinController.text.trim().replaceAll(RegExp(r'[^0-9]'), '');
@@ -186,50 +174,19 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
     String url;
     if (kIsWeb) {
-      // Decrypt embedded URL token using PIN
-      if (kEncryptedRelayUrl.isEmpty) {
+      // Use relay URL embedded at build time (not shown to user)
+      if (kRelayUrl.isEmpty) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
-              content: Text('No encrypted URL configured. Rebuild with --dart-define=ENCRYPTED_RELAY_URL=<hex>'),
+              content: Text('No relay URL configured. Rebuild with --dart-define=RELAY_URL=<url>'),
               duration: Duration(seconds: 4),
             ),
           );
         }
         return;
       }
-      try {
-        final derivedKey = await NativeCrypto.deriveKey(pin);
-        final encBytes = _hexDecode(kEncryptedRelayUrl);
-        final decrypted = await NativeCrypto.decrypt(
-          Uint8List.fromList(derivedKey),
-          Uint8List.fromList(encBytes),
-        );
-        url = utf8.decode(decrypted);
-        if (!url.startsWith('ws://') && !url.startsWith('wss://')) {
-          throw Exception('Invalid URL after decryption');
-        }
-        _pinAttempts = 0;
-        _lockoutUntil = null;
-      } catch (e) {
-        _pinAttempts++;
-        if (_pinAttempts >= _maxAttempts) {
-          _lockoutUntil = DateTime.now().add(_lockoutDuration);
-        }
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(
-                _pinAttempts >= _maxAttempts
-                    ? 'Too many failed attempts. Locked for ${_lockoutDuration.inSeconds}s.'
-                    : 'Wrong PIN. (${_maxAttempts - _pinAttempts} attempts remaining)',
-              ),
-              duration: const Duration(seconds: 3),
-            ),
-          );
-        }
-        return;
-      }
+      url = kRelayUrl;
     } else {
       url = _urlController.text.trim();
       if (url.isEmpty) return;

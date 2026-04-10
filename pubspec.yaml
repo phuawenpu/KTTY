@@ -17,6 +17,8 @@ dependencies:
   speech_to_text: ^7.0.0
   ktty_bridge:
     path: rust_builder
+  cryptography: ^2.9.0
+  pqcrypto: ^0.1.0
 
 dev_dependencies:
   flutter_test:

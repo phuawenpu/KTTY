@@ -1,0 +1,22 @@
+[package]
+name = "ktty-wasm-crypto"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+ktty-common = { path = "../common" }
+wasm-bindgen = "0.2"
+js-sys = "0.3"
+# `getrandom` needs the `js` feature to use the browser's
+# crypto.getRandomValues on wasm32-unknown-unknown. Without this,
+# anything that calls OsRng (chacha20poly1305 nonces, ml-kem
+# encapsulation, etc.) panics at runtime.
+getrandom = { version = "0.2", features = ["js"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1

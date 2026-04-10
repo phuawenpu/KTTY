@@ -1,8 +1,9 @@
 import 'dart:convert';
+import 'dart:ffi' as ffi;
+import 'dart:io' show Platform;
 import 'dart:typed_data';
 import 'package:cryptography/cryptography.dart';
-import 'package:pqcrypto/pqcrypto.dart' as pqcrypto;
-import 'package:pqcrypto/src/algos/kyber/kem.dart' show KyberLevel;
+import 'package:ffi/ffi.dart';
 
 const _staticSalt = 'KTTY STATIC SALT VERSION 1';
 const _argon2MCost = 65536; // 64 MB
@@ -11,7 +12,62 @@ const _argon2PCost = 4;
 const _argon2OutputLen = 32;
 const _nonceLen = 24;
 
-bool get isCryptoAvailable => true;
+// ML-KEM-768 fixed sizes (FIPS 203)
+const _mlkemEkLen = 1184;
+const _mlkemCtLen = 1088;
+const _mlkemSsLen = 32;
+
+// ---------------------------------------------------------------------------
+// dart:ffi bindings for the Rust `ktty-ffi-crypto` cdylib.
+//
+// All crypto except ML-KEM is handled in pure Dart by `package:cryptography`,
+// because Argon2id, XChaCha20-Poly1305, and HMAC-SHA256 are standardized and
+// have stable Dart implementations. ML-KEM is the lone exception: the Dart
+// `pqcrypto` package implements an older CRYSTALS-Kyber draft that produces
+// different shared secrets than the FIPS 203 ML-KEM in the Rust `ml-kem`
+// crate (which the agent uses). The interop test in
+// `tests/mlkem_interop/` confirms this. So for ML-KEM we call into the same
+// Rust crate as the agent via FFI.
+// ---------------------------------------------------------------------------
+
+typedef _MlkemEncapsulateNative = ffi.Int32 Function(
+    ffi.Pointer<ffi.Uint8>, ffi.Pointer<ffi.Uint8>, ffi.Pointer<ffi.Uint8>);
+typedef _MlkemEncapsulateDart = int Function(
+    ffi.Pointer<ffi.Uint8>, ffi.Pointer<ffi.Uint8>, ffi.Pointer<ffi.Uint8>);
+
+ffi.DynamicLibrary _openLib() {
+  if (Platform.isAndroid || Platform.isLinux) {
+    return ffi.DynamicLibrary.open('libktty_ffi_crypto.so');
+  }
+  if (Platform.isMacOS) {
+    return ffi.DynamicLibrary.open('libktty_ffi_crypto.dylib');
+  }
+  if (Platform.isIOS) {
+    // iOS statically links the .a into the app binary
+    return ffi.DynamicLibrary.process();
+  }
+  if (Platform.isWindows) {
+    return ffi.DynamicLibrary.open('ktty_ffi_crypto.dll');
+  }
+  throw UnsupportedError('Unsupported platform for ktty_ffi_crypto');
+}
+
+late final ffi.DynamicLibrary _lib = _openLib();
+late final _MlkemEncapsulateDart _mlkemEncapsulate = _lib
+    .lookup<ffi.NativeFunction<_MlkemEncapsulateNative>>('ktty_mlkem_encapsulate')
+    .asFunction<_MlkemEncapsulateDart>();
+
+bool get isCryptoAvailable {
+  // Touch the lib to confirm it loads. Any failure here means the .so was
+  // not bundled into the APK; the caller surfaces a friendly error.
+  try {
+    final probe = _lib.lookup<ffi.NativeFunction<ffi.Uint32 Function()>>(
+        'ktty_ffi_crypto_version');
+    return probe.address != 0;
+  } catch (_) {
+    return false;
+  }
+}
 
 Future<Uint8List> deriveKey(String pin) async {
   final argon2 = Argon2id(
@@ -70,9 +126,28 @@ Future<Uint8List> decrypt(Uint8List key, Uint8List packed) async {
 }
 
 Future<(Uint8List, Uint8List)> mlkemEncapsulate(Uint8List ekBytes) async {
-  final kem = pqcrypto.KyberKem(KyberLevel.kem768);
-  final (ct, ss) = kem.encapsulate(ekBytes);
-  return (ct, ss);
+  if (ekBytes.length != _mlkemEkLen) {
+    throw ArgumentError(
+        'ML-KEM-768 encapsulation key must be $_mlkemEkLen bytes, got ${ekBytes.length}');
+  }
+
+  final ekPtr = calloc<ffi.Uint8>(_mlkemEkLen);
+  final ctPtr = calloc<ffi.Uint8>(_mlkemCtLen);
+  final ssPtr = calloc<ffi.Uint8>(_mlkemSsLen);
+  try {
+    ekPtr.asTypedList(_mlkemEkLen).setAll(0, ekBytes);
+    final rc = _mlkemEncapsulate(ekPtr, ctPtr, ssPtr);
+    if (rc != 0) {
+      throw StateError('ML-KEM encapsulation failed (rc=$rc)');
+    }
+    final ct = Uint8List.fromList(ctPtr.asTypedList(_mlkemCtLen));
+    final ss = Uint8List.fromList(ssPtr.asTypedList(_mlkemSsLen));
+    return (ct, ss);
+  } finally {
+    calloc.free(ekPtr);
+    calloc.free(ctPtr);
+    calloc.free(ssPtr);
+  }
 }
 
 Future<bool> verifyHmac(

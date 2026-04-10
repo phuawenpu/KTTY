@@ -1,4 +1,4 @@
 [workspace]
-members = ["common", "relay", "agent"]
+members = ["common", "relay", "agent", "ffi-crypto"]
 exclude = ["wasm-crypto"]
 resolver = "2"

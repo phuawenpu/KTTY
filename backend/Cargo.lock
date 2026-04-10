@@ -843,6 +843,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ktty-ffi-crypto"
+version = "0.1.0"
+dependencies = [
+ "ktty-common",
+]
+
+[[package]]
 name = "ktty-relay"
 version = "0.1.0"
 dependencies = [

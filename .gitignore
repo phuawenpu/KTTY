@@ -73,6 +73,8 @@ chromium-wrapper.sh
 # Rust build artifacts
 backend/target/
 tests/mlkem_interop/rust_baseline/target/
+backend/wasm-crypto/target/
+backend/wasm-crypto/Cargo.lock
 
 # Gradle cache
 .gradle/

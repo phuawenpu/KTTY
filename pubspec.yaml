@@ -13,12 +13,9 @@ dependencies:
   xterm: ^4.0.0
   web_socket_channel: ^3.0.3
   provider: ^6.0.0
-  flutter_rust_bridge: ^2.12.0
   speech_to_text: ^7.0.0
-  ktty_bridge:
-    path: rust_builder
   cryptography: ^2.9.0
-  pqcrypto: ^0.1.0
+  ffi: ^2.1.0
 
 dev_dependencies:
   flutter_test:

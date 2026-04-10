@@ -4,6 +4,8 @@ use chacha20poly1305::{
     XChaCha20Poly1305, XNonce,
 };
 use hmac::{Hmac, Mac};
+use ml_kem::kem::Encapsulate;
+use ml_kem::{EncodedSizeUser, KemCore, MlKem768};
 use sha2::Sha256;
 use thiserror::Error;
 
@@ -19,6 +21,8 @@ pub enum CryptoError {
     Decrypt,
     #[error("Invalid packed data length")]
     InvalidLength,
+    #[error("ML-KEM error")]
+    MlKem,
 }
 
 /// Derive a 32-byte key from the user PIN using Argon2id.
@@ -101,6 +105,26 @@ pub fn verify_hmac(argon2_key: &[u8; 32], data: &[u8], expected: &[u8]) -> bool 
     mac.verify_slice(expected).is_ok()
 }
 
+/// ML-KEM-768 encapsulation. Takes the agent's encapsulation (public) key and
+/// returns `(ciphertext, shared_secret)`. The Flutter client side of the
+/// handshake; the matching `decapsulate` lives in `agent::session`.
+///
+/// `ek_bytes` must be exactly 1184 bytes (ML-KEM-768 ek size).
+/// Output ciphertext is 1088 bytes; shared secret is 32 bytes.
+pub fn mlkem_encapsulate(ek_bytes: &[u8]) -> Result<(Vec<u8>, [u8; 32]), CryptoError> {
+    type Ek = <MlKem768 as KemCore>::EncapsulationKey;
+    let encoded: ml_kem::Encoded<Ek> =
+        ek_bytes.try_into().map_err(|_| CryptoError::MlKem)?;
+    let ek = Ek::from_bytes(&encoded);
+
+    let mut rng = rand::thread_rng();
+    let (ct, ss) = ek.encapsulate(&mut rng).map_err(|_| CryptoError::MlKem)?;
+
+    let mut ss_arr = [0u8; 32];
+    ss_arr.copy_from_slice(ss.as_slice());
+    Ok((ct.as_slice().to_vec(), ss_arr))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -152,5 +176,21 @@ mod tests {
         let mac = compute_hmac(&key, data);
         assert!(verify_hmac(&key, data, &mac));
         assert!(!verify_hmac(&key, b"wrong data", &mac));
+    }
+
+    #[test]
+    fn test_mlkem_encapsulate_roundtrip() {
+        use ml_kem::kem::Decapsulate;
+        let mut rng = rand::thread_rng();
+        let (dk, ek) = MlKem768::generate(&mut rng);
+        let ek_bytes = ek.as_bytes();
+
+        let (ct_vec, ss_client) = mlkem_encapsulate(ek_bytes.as_slice()).unwrap();
+        assert_eq!(ct_vec.len(), 1088);
+
+        let ct: &ml_kem::Ciphertext<MlKem768> =
+            ct_vec.as_slice().try_into().unwrap();
+        let ss_server = dk.decapsulate(ct).unwrap();
+        assert_eq!(ss_client.as_slice(), ss_server.as_slice());
     }
 }

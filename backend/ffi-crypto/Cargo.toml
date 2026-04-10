@@ -1,0 +1,12 @@
+[package]
+name = "ktty-ffi-crypto"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+# `cdylib` for Flutter dart:ffi (Android/iOS/desktop)
+# `staticlib` for iOS static linking
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+ktty-common = { path = "../common" }

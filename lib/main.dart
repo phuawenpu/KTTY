@@ -1,21 +1,15 @@
-import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'app.dart';
 import 'services/crypto/native_crypto.dart';
-import 'src/rust/frb_generated.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // Rust FFI is only available on native platforms (Android/iOS/desktop).
-  // On web, crypto is handled by WASM module loaded in index.html.
-  if (!kIsWeb) {
-    await RustLib.init();
-  }
-
-  // Block app if crypto is not available (web WASM check only)
-  if (kIsWeb && !NativeCrypto.isCryptoAvailable) {
+  // Block app if the platform's crypto is unavailable. On native this means
+  // the libktty_ffi_crypto cdylib failed to load (missing from APK). On web
+  // it means the WASM module didn't initialize.
+  if (!NativeCrypto.isCryptoAvailable) {
     runApp(const _CryptoErrorApp());
     return;
   }

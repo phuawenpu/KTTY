@@ -16,6 +16,28 @@
 
 import init, * as crypto from './wasm/ktty_wasm_crypto.js';
 
+// Defensively unregister any old Flutter service worker on every load.
+// We had a few rounds of "the deploy is correct but the user still sees
+// the previous build" — that's the SW caching the old main.dart.js. By
+// proactively unregistering on every visit, we let Flutter's loader
+// re-register a fresh worker against the latest assets. This adds one
+// network round-trip on first paint, which is a fine tradeoff for not
+// being permanently stuck on a stale build.
+if ('serviceWorker' in navigator) {
+  try {
+    const regs = await navigator.serviceWorker.getRegistrations();
+    for (const r of regs) {
+      // Only nuke our own; other origins' SWs are isolated anyway.
+      if (r.scope.includes('/KTTY/')) {
+        await r.unregister();
+        console.log('[KTTY] Unregistered stale service worker:', r.scope);
+      }
+    }
+  } catch (e) {
+    console.warn('[KTTY] SW unregister failed (non-fatal):', e);
+  }
+}
+
 try {
   await init();
   // Assign the module namespace object directly. Don't try to copy

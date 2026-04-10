@@ -55,32 +55,12 @@
   <link rel="manifest" href="manifest.json">
 </head>
 <body>
-  <script type="module">
-    // Load WASM crypto BEFORE flutter_bootstrap.js. The top-level `await`
-    // here is what makes that ordering work — module scripts that use
-    // top-level await block any subsequent <script> tag from executing,
-    // so flutter_bootstrap.js doesn't run until window._kttyCrypto is
-    // ready. Without this, Flutter's main.dart can call NativeCrypto
-    // before the WASM module has finished initialising and the
-    // resulting handshake produces a wrong key (looks like "wrong PIN"
-    // to the user).
-    import init, * as crypto from './wasm/ktty_wasm_crypto.js';
-    try {
-      await init();
-      // Assign the module namespace object directly. Don't try to copy
-      // the function references onto a wrapper object — the wasm-bindgen
-      // exports rely on the module-namespace identity, and a copied
-      // wrapper can produce subtly wrong results that look like a key
-      // mismatch. The CSP above is the real defence-in-depth for
-      // unwanted access to this global.
-      window._kttyCrypto = crypto;
-      window._kttyCryptoReady = true;
-      console.log('[KTTY] WASM crypto loaded');
-    } catch (e) {
-      window._kttyCryptoReady = false;
-      console.error('[KTTY] WASM crypto failed:', e);
-    }
-  </script>
+  <!--
+    External WASM loader — see web/wasm-loader.js for why it's not inline.
+    The top-level `await` inside that module blocks flutter_bootstrap.js
+    below from executing until window._kttyCrypto is fully populated.
+  -->
+  <script type="module" src="wasm-loader.js"></script>
   <script src="flutter_bootstrap.js" async></script>
 </body>
 </html>

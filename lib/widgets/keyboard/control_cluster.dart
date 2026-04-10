@@ -126,8 +126,8 @@ class ControlCluster extends StatelessWidget {
       height: 38,
       child: Row(
         children: [
-          _buildKey('Esc', '\x1b'),
           _buildKey('Tab', '\t'),
+          _buildKey('Esc', '\x1b'),
           _buildModifierKey('Ctrl', ctrlActive, onCtrlToggle),
           // Single CAPS key replaces the previous ab/Aa pair. Tapping it
           // toggles caps lock; the bottom-row up-arrow on the qwerty layer

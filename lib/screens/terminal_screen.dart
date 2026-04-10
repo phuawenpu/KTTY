@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
@@ -139,6 +141,24 @@ class _TerminalScreenState extends State<TerminalScreen> {
     Navigator.pushReplacementNamed(context, '/dashboard');
   }
 
+  /// Show a popup with end-to-end keystroke latency, traffic counters,
+  /// session age, and build/version info. Reads from
+  /// `widget.terminalService.stats` and the live SessionState. The
+  /// dialog rebuilds itself once a second so the user can watch the
+  /// numbers move while typing.
+  void _showStatsDialog() {
+    showDialog<void>(
+      context: context,
+      barrierDismissible: true,
+      builder: (ctx) {
+        return _StatsDialog(
+          stats: widget.terminalService.stats,
+          session: context.read<SessionState>(),
+        );
+      },
+    );
+  }
+
   void _toggleViewport() {
     final vs = context.read<ViewportState>();
 
@@ -189,17 +209,27 @@ class _TerminalScreenState extends State<TerminalScreen> {
         appBar: AppBar(
           title: Row(
             mainAxisSize: MainAxisSize.min,
-            children: [
-              Image.asset('assets/ktty_logo.png', height: 18),
-              const SizedBox(width: 4),
-              const Text('KTTY', style: TextStyle(fontSize: 13)),
-              const SizedBox(width: 6),
-              const ConnectionIndicator(),
+            children: const [
+              // The KTTY title now carries the connection status via its
+              // own colour (see KttyTitle). The dot to the right is a
+              // small visual anchor; the previous "Connected" /
+              // "Disconnected" text label was removed because it
+              // overlapped the font-size +/- buttons on small phones.
+              KttyTitle(),
+              SizedBox(width: 6),
+              ConnectionIndicator(),
             ],
           ),
           backgroundColor: const Color(0xFF16213E),
           toolbarHeight: 32,
           titleTextStyle: const TextStyle(fontSize: 13),
+          // Drop the leading icon space so the title sits flush left and
+          // we get a few extra pixels of action-row real estate.
+          leading: Padding(
+            padding: const EdgeInsets.only(left: 8, top: 4, bottom: 4),
+            child: Image.asset('assets/ktty_logo.png', height: 18),
+          ),
+          leadingWidth: 32,
           actions: [
             // Font size controls
             _buildHeaderButton(Icons.remove, () {
@@ -248,6 +278,15 @@ class _TerminalScreenState extends State<TerminalScreen> {
               tooltip: _invertedTheme
                   ? 'Switch to dark terminal'
                   : 'Switch to light terminal',
+            ),
+            const SizedBox(width: 6),
+            // Stats / info popup
+            IconButton(
+              icon: const Icon(Icons.info_outline, size: 18),
+              onPressed: _showStatsDialog,
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(),
+              tooltip: 'Session stats',
             ),
             const SizedBox(width: 6),
             // Disconnect button
@@ -343,6 +382,147 @@ class _TerminalScreenState extends State<TerminalScreen> {
           child: Icon(icon, color: Colors.white54, size: 14),
         ),
       ),
+    );
+  }
+}
+
+/// Live-updating session stats popup. Rebuilds once a second so the
+/// numbers tick over while you watch them; cancels its timer when
+/// dismissed. Reads RTT samples + byte counters from
+/// [TerminalService.stats] and the connection status from
+/// [SessionState].
+class _StatsDialog extends StatefulWidget {
+  final TerminalStats stats;
+  final SessionState session;
+
+  const _StatsDialog({required this.stats, required this.session});
+
+  @override
+  State<_StatsDialog> createState() => _StatsDialogState();
+}
+
+class _StatsDialogState extends State<_StatsDialog> {
+  Timer? _ticker;
+
+  @override
+  void initState() {
+    super.initState();
+    _ticker = Timer.periodic(
+      const Duration(seconds: 1),
+      (_) {
+        if (mounted) setState(() {});
+      },
+    );
+  }
+
+  @override
+  void dispose() {
+    _ticker?.cancel();
+    super.dispose();
+  }
+
+  String _fmtBytes(int bytes) {
+    if (bytes < 1024) return '$bytes B';
+    if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
+    return '${(bytes / 1024 / 1024).toStringAsFixed(2)} MB';
+  }
+
+  String _fmtMs(num? ms) => ms == null ? '—' : '${ms.toStringAsFixed(0)} ms';
+
+  String _fmtUptime(int? seconds) {
+    if (seconds == null) return '—';
+    if (seconds < 60) return '${seconds}s';
+    if (seconds < 3600) return '${seconds ~/ 60}m ${seconds % 60}s';
+    final h = seconds ~/ 3600;
+    final m = (seconds % 3600) ~/ 60;
+    return '${h}h ${m}m';
+  }
+
+  Widget _row(String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 3),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              label,
+              style: const TextStyle(color: Colors.white60, fontSize: 13),
+            ),
+          ),
+          Text(
+            value,
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 13,
+              fontFamily: 'RobotoMono',
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _section(String heading) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 12, bottom: 4),
+      child: Text(
+        heading,
+        style: const TextStyle(
+          color: Colors.blueAccent,
+          fontSize: 11,
+          fontWeight: FontWeight.w700,
+          letterSpacing: 0.6,
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final s = widget.stats;
+    return AlertDialog(
+      backgroundColor: const Color(0xFF1A1A2E),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(8),
+        side: const BorderSide(color: Color(0xFF4A4A6A), width: 1),
+      ),
+      title: const Text(
+        'Session stats',
+        style: TextStyle(color: Colors.white, fontSize: 16),
+      ),
+      contentPadding: const EdgeInsets.fromLTRB(20, 8, 20, 12),
+      content: SizedBox(
+        width: 320,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _section('KEYSTROKE LATENCY (END-TO-END)'),
+            _row('Last', _fmtMs(s.lastRttMs)),
+            _row('Average (last ${s.sampleCount})', _fmtMs(s.averageRttMs)),
+            _row('Min', _fmtMs(s.minRttMs)),
+            _row('Max', _fmtMs(s.maxRttMs)),
+            _row('Samples', '${s.sampleCount} / ${s.capacity}'),
+            _section('TRAFFIC'),
+            _row('Bytes sent', _fmtBytes(s.bytesSent)),
+            _row('Bytes received', _fmtBytes(s.bytesReceived)),
+            _row('Messages sent', '${s.messagesSent}'),
+            _row('Messages received', '${s.messagesReceived}'),
+            _section('SESSION'),
+            _row('Status', widget.session.status.name),
+            _row('Uptime', _fmtUptime(s.sessionAgeSeconds)),
+            _row('Build', kAppBuildTime == 'dev' ? 'dev' : kAppBuildTime),
+            _row('App version', 'v$kAppVersion'),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Close', style: TextStyle(color: Colors.blueAccent)),
+        ),
+      ],
     );
   }
 }

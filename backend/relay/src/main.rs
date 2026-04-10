@@ -7,11 +7,23 @@ use axum::{
     response::IntoResponse,
     routing::get,
 };
+use rand::RngCore;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 
-type Tx = mpsc::UnboundedSender<Message>;
+type Tx = mpsc::Sender<Message>;
+
+/// Per-peer outbound channel depth. Bounded so a stalled writer doesn't
+/// let the relay accumulate unbounded memory.
+const PEER_CHANNEL_CAPACITY: usize = 64;
+
+/// Hard cap on a single inbound text frame from any peer. Anything bigger
+/// is dropped before serde_json::from_str even sees it.
+const MAX_TEXT_FRAME_BYTES: usize = 64 * 1024;
+
+/// Cap on the entire WebSocket message (sum of all fragments).
+const MAX_WS_MESSAGE_BYTES: usize = 256 * 1024;
 
 struct Peer {
     id: u64,
@@ -36,12 +48,15 @@ impl Room {
     fn add_peer(&mut self, tx: Tx) -> (u64, String) {
         let id = self.next_id;
         self.next_id += 1;
-        // Generate a simple auth token from id + timestamp (real security is in ML-KEM layer)
-        let now_nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let auth_token = format!("{:016x}{:032x}", id, now_nanos);
+        // 32 random bytes from OsRng, hex-encoded → 64-char unguessable token.
+        // The relay uses this as a "you joined and we said hello" cookie; it
+        // is NOT the cryptographic session key (that's the ML-KEM shared
+        // secret, derived end-to-end and never seen by the relay). Without
+        // it the relay would let any joiner forge handshake messages on
+        // behalf of an existing peer slot.
+        let mut token_bytes = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut token_bytes);
+        let auth_token = hex::encode(token_bytes);
         self.peers.push(Peer {
             id,
             tx,
@@ -82,7 +97,7 @@ async fn main() {
             for (room_id, room) in map.iter_mut() {
                 room.peers.retain(|p| {
                     let alive = now.duration_since(p.last_activity).as_secs() < 60
-                        && p.tx.send(Message::Ping(vec![].into())).is_ok();
+                        && p.tx.try_send(Message::Ping(vec![].into())).is_ok();
                     if !alive {
                         eprintln!("[relay] Evicting stale peer {} in room", p.id);
                     }
@@ -106,18 +121,13 @@ async fn main() {
     axum::serve(listener, app).await.unwrap();
 }
 
-async fn health_handler(rooms: RoomMap) -> impl IntoResponse {
-    let map = rooms.lock().await;
-    let room_count = map.len();
-    let peer_count: usize = map.values().map(|r| r.peers.len()).sum();
-    let body = format!(
-        "{{\"status\":\"ok\",\"rooms\":{},\"peers\":{},\"uptime_check\":true}}",
-        room_count, peer_count
-    );
+async fn health_handler(_rooms: RoomMap) -> impl IntoResponse {
+    // Don't leak room/peer counts to anonymous probers — Fly's healthcheck
+    // only needs a 2xx + a content-type.
     (
         axum::http::StatusCode::OK,
         [("content-type", "application/json")],
-        body,
+        "{\"status\":\"ok\"}",
     )
 }
 
@@ -125,7 +135,9 @@ async fn ws_handler(
     ws: WebSocketUpgrade,
     State(rooms): State<RoomMap>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_socket(socket, rooms))
+    ws.max_frame_size(MAX_TEXT_FRAME_BYTES)
+        .max_message_size(MAX_WS_MESSAGE_BYTES)
+        .on_upgrade(move |socket| handle_socket(socket, rooms))
 }
 
 async fn handle_socket(socket: WebSocket, rooms: RoomMap) {
@@ -133,9 +145,16 @@ async fn handle_socket(socket: WebSocket, rooms: RoomMap) {
 
     let (mut ws_tx, mut ws_rx) = socket.split();
 
-    // First message must be a join
+    // First message must be a join. The relay doesn't yet know who this
+    // peer is, so this is the only message that bypasses the auth-token
+    // check. Cap its size before parsing so a hostile client can't push
+    // megabytes of JSON into serde.
     let room_id = match ws_rx.next().await {
         Some(Ok(Message::Text(text))) => {
+            if text.len() > MAX_TEXT_FRAME_BYTES {
+                eprintln!("[relay] First message too large ({}), dropping", text.len());
+                return;
+            }
             match serde_json::from_str::<serde_json::Value>(&text) {
                 Ok(val) if val["action"] == "join" => {
                     val["room_id"].as_str().unwrap_or("").to_string()
@@ -151,10 +170,13 @@ async fn handle_socket(socket: WebSocket, rooms: RoomMap) {
         return;
     }
 
-    eprintln!("[relay] Client joined room: {}...{}", &room_id[..8], &room_id[room_id.len()-8..]);
+    // Don't log the room id at all — it's derived from the user's PIN and
+    // an attacker who sees enough of it can mount an offline Argon2 crack
+    // (see SECURITY.md / threat model in README.md).
+    eprintln!("[relay] Client joined a room");
 
-    // Create channel for this peer
-    let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
+    // Bounded channel: a stalled writer can't make us buffer arbitrary bytes.
+    let (tx, mut rx) = mpsc::channel::<Message>(PEER_CHANNEL_CAPACITY);
     let tx_auth = tx.clone();
 
     // Register in room and get our peer ID + auth token
@@ -166,7 +188,7 @@ async fn handle_socket(socket: WebSocket, rooms: RoomMap) {
         let room = map.entry(room_id.clone()).or_insert_with(Room::new);
 
         // Clean up stale peers — try sending a ping, evict if it fails
-        room.peers.retain(|p| p.tx.send(Message::Ping(vec![].into())).is_ok());
+        room.peers.retain(|p| p.tx.try_send(Message::Ping(vec![].into())).is_ok());
 
         if room.peers.len() >= 2 {
             // Evict the least recently active peer (likely a stale connection)
@@ -177,7 +199,7 @@ async fn handle_socket(socket: WebSocket, rooms: RoomMap) {
                 let evicted = &room.peers[idx];
                 // Notify the evicted peer so it knows to reconnect
                 let msg = serde_json::json!({"type": "peer_disconnect", "peer_id": evicted.id});
-                let _ = evicted.tx.send(Message::Text(serde_json::to_string(&msg).unwrap().into()));
+                let _ = evicted.tx.try_send(Message::Text(serde_json::to_string(&msg).unwrap().into()));
                 eprintln!("[relay] Room full, evicting least active peer {}", evicted.id);
                 room.peers.remove(idx);
             }
@@ -194,7 +216,7 @@ async fn handle_socket(socket: WebSocket, rooms: RoomMap) {
     {
         let auth_msg = serde_json::json!({"type": "auth", "token": &auth_token});
         let auth_text = Message::Text(serde_json::to_string(&auth_msg).unwrap().into());
-        let _ = tx_auth.send(auth_text);
+        let _ = tx_auth.try_send(auth_text);
     }
 
     // Notify existing peers that a new client joined by forwarding the join message
@@ -205,7 +227,7 @@ async fn handle_socket(socket: WebSocket, rooms: RoomMap) {
         if let Some(room) = map.get(&room_id) {
             for peer in &room.peers {
                 if peer.id != peer_id {
-                    let _ = peer.tx.send(join_text.clone());
+                    let _ = peer.tx.try_send(join_text.clone());
                     eprintln!("[relay] Notified peer {} of new join", peer.id);
                 }
             }
@@ -295,7 +317,7 @@ async fn handle_socket(socket: WebSocket, rooms: RoomMap) {
                 let map = rooms_tmp.lock().await;
                 if let Some(room) = map.get(&room_id_tmp) {
                     if let Some(peer) = room.peers.iter().find(|p| p.id == peer_id) {
-                        let _ = peer.tx.send(pong);
+                        let _ = peer.tx.try_send(pong);
                     }
                 }
                 // Also update activity
@@ -321,25 +343,43 @@ async fn handle_socket(socket: WebSocket, rooms: RoomMap) {
             _ => {}
         }
 
-        // For text messages, validate auth token
+        // For text messages, validate auth token. Every text message after
+        // the initial join (which is handled separately above) must carry
+        // the token the relay handed back in the auth reply. There are no
+        // "free pass" message types — including handshake/boot — so an
+        // attacker who connects to a room cannot forge handshake material
+        // on behalf of another peer slot.
         if let Message::Text(ref text) = msg {
+            if text.len() > MAX_TEXT_FRAME_BYTES {
+                eprintln!("[relay] Peer {} sent oversized frame ({}), dropping", peer_id, text.len());
+                continue;
+            }
             let text_str = text.to_string();
-            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&text_str) {
-                // Join/action and handshake messages don't require auth
-                let is_exempt = val.get("action").is_some()
-                    || val.get("type").and_then(|v| v.as_str()) == Some("handshake")
-                    || val.get("type").and_then(|v| v.as_str()) == Some("boot");
-                if !is_exempt {
+            match serde_json::from_str::<serde_json::Value>(&text_str) {
+                Ok(val) => {
                     let msg_auth = val.get("auth").and_then(|v| v.as_str()).unwrap_or("");
                     let map = rooms_read.lock().await;
-                    if let Some(room) = map.get(&room_id_read) {
+                    let token_ok = if let Some(room) = map.get(&room_id_read) {
                         if let Some(peer) = room.peers.iter().find(|p| p.id == peer_id) {
-                            if peer.auth_token != msg_auth {
-                                eprintln!("[relay] Auth token mismatch from peer {}, dropping", peer_id);
-                                continue;
-                            }
+                            use subtle::ConstantTimeEq;
+                            // Constant-time compare so the relay doesn't leak
+                            // a timing oracle on the auth token.
+                            peer.auth_token.as_bytes().ct_eq(msg_auth.as_bytes()).into()
+                        } else {
+                            false
                         }
+                    } else {
+                        false
+                    };
+                    drop(map);
+                    if !token_ok {
+                        eprintln!("[relay] Auth token mismatch from peer {}, dropping", peer_id);
+                        continue;
                     }
+                }
+                Err(_) => {
+                    eprintln!("[relay] Peer {} sent invalid JSON, dropping frame", peer_id);
+                    continue;
                 }
             }
         }
@@ -369,7 +409,7 @@ async fn handle_socket(socket: WebSocket, rooms: RoomMap) {
             };
             for peer in &room.peers {
                 if peer.id != peer_id {
-                    let _ = peer.tx.send(forward_msg.clone());
+                    let _ = peer.tx.try_send(forward_msg.clone());
                 }
             }
         }
@@ -388,7 +428,7 @@ async fn handle_socket(socket: WebSocket, rooms: RoomMap) {
             let disconnect_msg = serde_json::json!({"type": "peer_disconnect", "peer_id": peer_id});
             let disconnect_text = Message::Text(serde_json::to_string(&disconnect_msg).unwrap().into());
             for peer in &room.peers {
-                let _ = peer.tx.send(disconnect_text.clone());
+                let _ = peer.tx.try_send(disconnect_text.clone());
                 eprintln!("[relay] Notified peer {} of disconnect", peer.id);
             }
 

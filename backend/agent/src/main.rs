@@ -42,18 +42,24 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     // Prompt for PIN
-    eprint!("Enter PIN: ");
+    eprint!("Enter PIN (8+ digits): ");
     std::io::stderr().flush()?;
     let mut pin = String::new();
     std::io::stdin().read_line(&mut pin)?;
     // Strip to digits only
     let pin: String = pin.trim().chars().filter(|c| c.is_ascii_digit()).collect();
 
-    if pin.is_empty() {
-        eprintln!("PIN cannot be empty (digits only)");
+    // Enforce minimum PIN length. The room id is `hex(Argon2id(pin))` and is
+    // visible to the relay, so a short PIN can be cracked offline by anyone
+    // who sees a join. 8 digits gives ~10^8 candidates → months on a single
+    // CPU core at our Argon2 cost; longer is better.
+    if pin.len() < 8 {
+        eprintln!("PIN must be at least 8 digits (got {})", pin.len());
         std::process::exit(1);
     }
-    eprintln!("PIN: {} ({} digits)", pin, pin.len());
+    // Never log the PIN itself — it would end up in scroll-back, journald,
+    // and any terminal-recording software. Only the digit count is safe.
+    eprintln!("PIN received ({} digits)", pin.len());
 
     // Derive key (this takes a few seconds due to Argon2id)
     eprintln!("Deriving key...");

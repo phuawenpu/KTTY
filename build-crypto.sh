@@ -23,6 +23,16 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BACKEND="$SCRIPT_DIR/backend"
 
+# Strip absolute paths from the resulting .so/.wasm so panic metadata,
+# debug strings, and embedded source-file references don't leak the
+# developer's home directory or cargo registry hash to anyone running
+# `strings` on the published artifacts.
+export RUSTFLAGS="${RUSTFLAGS:-} \
+  --remap-path-prefix=$HOME=/h \
+  --remap-path-prefix=$SCRIPT_DIR=/ktty \
+  --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo \
+  --remap-path-prefix=${RUSTUP_HOME:-$HOME/.rustup}=/rustup"
+
 echo "==> Building ktty-ffi-crypto for Android (cdylib)"
 cd "$BACKEND"
 cargo ndk \

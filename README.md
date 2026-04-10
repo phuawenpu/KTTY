@@ -48,6 +48,101 @@ check is that the Rust crypto on **both sides** is built from the same
 `test_mlkem_encapsulate_roundtrip` test pairs `mlkem_encapsulate` against the
 agent's `decapsulate` path and will fail loudly if they drift apart.
 
+## Threat model
+
+KTTY is end-to-end encrypted with ML-KEM-768 + XChaCha20-Poly1305. The relay
+is fully untrusted. Concretely:
+
+**Protected against**
+- A passive observer of the WSS traffic (including the relay operator,
+  Fly.io, Cloudflare, your ISP) — sees only ciphertext envelopes and the
+  room id; can't read PTY data or recover the session key.
+- An active MITM at the relay (or anyone else with relay access) trying to
+  swap their own ML-KEM key into the handshake — the agent signs the
+  shared secret with HMAC-SHA256 keyed by the Argon2id-PIN-key, which a
+  MITM does not have. The Flutter side rejects mismatched HMACs with
+  "possible MITM attack".
+- An attacker with the published APK or PWA build trying to find baked-in
+  secrets — there are none. Both client and server compute the room id and
+  session key from the user's PIN; nothing is shipped in the binaries.
+- A web XSS or hostile browser extension trying to call into the WASM
+  crypto via `window._kttyCrypto` — the global is wrapped in
+  `Object.freeze`, the page ships a strict CSP (`default-src 'self'`),
+  and `wasm-unsafe-eval` is the only relaxation.
+- A bored user typing `ws://` instead of `wss://` — the dashboard URL
+  field rejects anything that isn't `wss://`, and the Android manifest
+  has `usesCleartextTraffic="false"` so the OS rejects it too.
+
+**NOT protected against**
+- Anyone who knows your PIN. The PIN is the only secret. Treat it like a
+  password.
+- An offline brute-force attacker who has observed your room id and is
+  willing to spend CPU on Argon2id. The minimum PIN length is enforced at
+  **8 digits** in both the agent and the Flutter dashboard. With Argon2id
+  at M=64MB / T=3 / P=4, an 8-digit PIN takes months on a single core and
+  ~weeks on a high-end GPU rig — but a 6-digit PIN would take hours.
+  *Use long PINs.* The relay no longer logs the room id and the
+  `/health` endpoint no longer leaks active room/peer counts.
+- A compromised host. If something already has root on the machine
+  running `ktty-agent`, it can read the PIN as you type it, snapshot the
+  PTY, or replace the binary. KTTY is not a sandbox.
+- An attacker with physical possession of an unlocked phone after a
+  successful handshake — the session key sits in process memory.
+- A user installing a malicious build from somewhere other than the
+  source repo. Verify your APK / PWA build originates from a clean
+  checkout.
+
+**Defense in depth: relay-level auth tokens.** When a peer joins a room
+the relay generates a 256-bit random token (`OsRng`, hex-encoded) and
+hands it back. **Every** subsequent text message — including handshake
+and boot — must carry that token in an `auth` field, and the relay
+constant-time-compares before forwarding. There are no exempt message
+types. This is *not* a security boundary against an attacker who has the
+PIN (the PIN is the real secret), but it does stop a passive room
+squatter from forging handshake material on behalf of an existing peer.
+
+## Security history (v2 — 2026-04-10 audit)
+
+The repo went public on 2026-04-10. A security audit immediately afterward
+flagged five real issues, all now fixed in commit history (see
+`git log --grep=security` and `git log --grep=Harden`):
+
+- **Relay auth token was forgeable** (`format!("{:016x}{:032x}", id, nanos)`)
+  and the relay exempted `action`, `handshake`, and `boot` messages from
+  auth checks entirely, meaning an attacker could forge handshake
+  material on behalf of any peer slot. **Fix:** 32-byte CSPRNG token,
+  constant-time comparison via `subtle`, no exemptions other than the
+  initial `join` (which goes through a separate code path with no token
+  yet to check).
+- **Trivial DoS on the relay** (unbounded mpsc channels, no WS frame size
+  cap, no per-message length check). **Fix:** bounded `mpsc::channel(64)`,
+  `WebSocketUpgrade::max_frame_size(64 KB).max_message_size(256 KB)`,
+  oversized frames rejected before `serde_json::from_str`.
+- **Agent printed the user's PIN to stderr.** **Fix:** logs digit count
+  only.
+- **Cleartext WebSocket allowed on Android** (`usesCleartextTraffic=true`)
+  + the Flutter dashboard accepted `ws://`. **Fix:** manifest set to
+  `false`, dashboard rejects any URL that doesn't start with `wss://`.
+- **`window._kttyCrypto` reachable to any script on the PWA origin and no
+  CSP.** **Fix:** strict `<meta>` CSP (`default-src 'self'`,
+  `script-src 'self' 'wasm-unsafe-eval'`, `connect-src 'self' wss://*.fly.dev`,
+  `frame-ancestors 'none'`), and the global is wrapped with
+  `Object.freeze` so its methods can't be hot-swapped.
+
+Other hardening in the same change set:
+- Build artifacts (`*.so`, `*.wasm`) are now built with
+  `--remap-path-prefix` so they no longer leak the developer's home
+  directory via embedded panic metadata. Run `strings` on them to verify.
+- `.gitignore` defensively blocks common secret filenames (`.env*`,
+  `*.pem`, `*.key`, `*.keystore`, `credentials.json`,
+  `service-account*.json`, `.netrc`, `*.pat`, etc.) so a future
+  `git add -A` can't accidentally publish a secret.
+- `/health` endpoint no longer returns live room/peer counts.
+- Relay no longer logs the joined room id (it's PIN-derived material —
+  see threat model).
+- **Minimum PIN length 8** enforced on both agent (`backend/agent/src/main.rs`)
+  and Flutter dashboard (`lib/screens/dashboard_screen.dart`).
+
 ---
 
 ## Repository layout (every file)
@@ -143,8 +238,8 @@ agent's `decapsulate` path and will fail loudly if they drift apart.
 
 | Path | Purpose |
 |---|---|
-| `backend/relay/Cargo.toml` | `axum 0.8` with `ws` feature, `tokio`, `serde_json`, `futures-util`. |
-| `backend/relay/src/main.rs` | Single-file Axum service. Maintains a `HashMap<room_id, Room>` with up to N peers per room. On `join` it generates an auth token and replies with it. On every subsequent message it validates the token and forwards the bytes to the *other* peer in the room. Has a 60s stale-peer TTL, 30s background eviction, 10s write timeout (to detect dead TCP), pong responses to client pings, and `least-active` peer eviction when a room hits the cap. **Sees only ciphertext.** |
+| `backend/relay/Cargo.toml` | `axum 0.8` (ws feature), `tokio`, `serde_json`, `futures-util`, `rand` + `hex` (for the CSPRNG auth token), `subtle` (constant-time token compare). |
+| `backend/relay/src/main.rs` | Single-file Axum service. Maintains a `HashMap<room_id, Room>` with up to 2 peers per room. On `join` it generates a 256-bit `OsRng` auth token and replies with it. On every subsequent text frame it constant-time-validates the token (no exempt message types — handshake/boot are checked too) and forwards the bytes to the other peer in the room. WebSocket frames are capped at 64 KB and total messages at 256 KB. Per-peer outbound channels are bounded at 64 messages so a stalled writer can't OOM the relay. Has a 60s stale-peer TTL, 30s background eviction, 10s write timeout, pong responses to client pings, and least-active peer eviction when a room hits the cap. The `/health` endpoint returns `{"status":"ok"}` only — no live counts. **Sees only ciphertext, never logs the room id.** |
 | `backend/Dockerfile` | `FROM rust:1.94-bookworm AS builder` → builds `ktty-relay` → `FROM debian:bookworm-slim` runtime. Used by `fly deploy`. |
 | `backend/fly.toml` | Fly.io config: `app = 'ktty-relay'`, region `sin` (Singapore), `min_machines_running = 1`, `auto_stop_machines = 'off'`, health check on `GET /health`, 256 MB shared CPU. |
 | `backend/Cargo.toml` | Workspace manifest: members `common`, `relay`, `agent`, `ffi-crypto`. Excludes `wasm-crypto`. |
@@ -328,10 +423,11 @@ cargo run --release -p ktty-relay -- 8080
 KTTY_RELAY_URL=wss://ktty-relay.fly.dev/ws ./ktty-agent
 ```
 
-It will print `Enter PIN:`. Type any digit string (4-12 digits is comfortable
-on the phone keypad). It runs Argon2id (a few seconds) and prints the
-derived room id. Then it spawns a tmux session called `ktty` and waits for
-a Flutter client to join.
+It will print `Enter PIN (8+ digits):`. **Minimum is 8 digits** — the agent
+will refuse anything shorter (see threat model). It runs Argon2id (a few
+seconds) and confirms the digit count without printing the PIN itself. Then
+it spawns a tmux session called `ktty` and waits for a Flutter client to
+join.
 
 A pre-built copy of the binary is dropped at `../ktty-agent` (relative to
 the workspace) by `./build-agent.sh`.
@@ -387,7 +483,10 @@ will 404 on its own assets.
 
 | Symptom | Probable cause | Fix |
 |---|---|---|
-| `HMAC verification failed — possible MITM attack` | Flutter and agent are using different ML-KEM implementations. | Make sure `lib/services/crypto/native_crypto_ffi.dart` calls `_mlkemEncapsulate` (the FFI one), not `pqcrypto`. Run `cargo test -p ktty-common test_mlkem`. Run `./build-crypto.sh` and rebuild the APK. |
+| `HMAC verification failed — possible MITM attack` | Either (a) Flutter and agent are using different ML-KEM implementations, or (b) someone is genuinely tampering with your handshake. The relay-level auth tokens are constant-time-checked and there are no exempt message types, so a passive room squatter on the relay cannot trigger this. | Confirm `lib/services/crypto/native_crypto_ffi.dart` calls `_mlkemEncapsulate` (the FFI one), not `pqcrypto`. Run `cargo test -p ktty-common test_mlkem`. Run `./build-crypto.sh` and rebuild the APK. |
+| `PIN must be at least 8 digits` | You typed a PIN shorter than 8. | Use a longer PIN. The minimum is enforced on both agent and Flutter; see threat model. |
+| `Relay URL must use wss://` | You typed `ws://` in the dashboard URL field. | Use `wss://`. Cleartext is rejected because it lets a network attacker observe your room id (PIN-derived material). |
+| `Auth token mismatch from peer` in relay logs | A client sent a text message without including the auth token the relay handed back at join time, OR with the wrong token. With the v2 fix this can also indicate that you're running a *new* relay against an *old* agent/client that doesn't include `auth` on handshake messages. | Rebuild and redeploy both ends from the same commit. |
 | `dart:ffi`: `Failed to load dynamic library "libktty_ffi_crypto.so"` | The cdylib wasn't bundled into the APK for the device's ABI. | Run `./build-crypto.sh` to repopulate `android/app/src/main/jniLibs/` for all 4 ABIs, then rebuild the APK. Confirm with `unzip -l app-release.apk \| grep libktty`. |
 | PWA stuck on the "Crypto Module Unavailable" screen | `web/wasm/ktty_wasm_crypto.{js,wasm}` missing or corrupted. | Run `./build-crypto.sh` (wasm-pack section), confirm the files exist, hard-reload the browser to dump the service worker cache. |
 | `flutter pub get` complains about `ktty_bridge` | An old `pubspec.yaml` from before the Rust-FFI removal. | The current `pubspec.yaml` has no `ktty_bridge` dep. Check you're on a clean `main`. |

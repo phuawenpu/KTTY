@@ -289,7 +289,7 @@ impl Session {
             // ML-KEM handshake → new session key
             eprintln!("[agent] Starting ML-KEM handshake...");
             let session_key =
-                match self.perform_handshake(&ws_send_tx, &mut ws_rx).await {
+                match self.perform_handshake(&ws_send_tx, &mut ws_rx, &relay_auth_token).await {
                     Ok(key) => key,
                     Err(e) => {
                         eprintln!("[agent] Handshake failed: {e}, waiting for new client");
@@ -584,6 +584,7 @@ impl Session {
         &self,
         ws_send: &mpsc::UnboundedSender<Message>,
         ws_rx: &mut R,
+        relay_auth_token: &Option<String>,
     ) -> anyhow::Result<[u8; 32]>
     where
         R: StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>>
@@ -595,14 +596,20 @@ impl Session {
         let mut rng = rand::thread_rng();
         let (dk, ek) = MlKem768::generate(&mut rng);
 
-        // Send encapsulation key (public key)
+        // Send encapsulation key (public key) — must include the relay's
+        // auth token, since the relay no longer exempts handshake messages
+        // from token validation.
         let ek_bytes = ek.as_bytes();
         eprintln!(
             "[agent] Sending ML-KEM public key ({} bytes)",
             ek_bytes.len()
         );
         let offer = HandshakeOffer::new(BASE64.encode(ek_bytes.as_slice()));
-        ws_send.send(text_msg(serde_json::to_string(&offer)?))?;
+        let mut offer_json = serde_json::to_value(&offer)?;
+        if let Some(token) = relay_auth_token.as_ref() {
+            offer_json["auth"] = serde_json::Value::String(token.clone());
+        }
+        ws_send.send(text_msg(serde_json::to_string(&offer_json)?))?;
 
         // Wait for Flutter's ciphertext reply
         eprintln!("[agent] Waiting for ML-KEM ciphertext...");
@@ -640,10 +647,14 @@ impl Session {
                                 // HMAC verification
                                 let hmac =
                                     crypto::compute_hmac(&self.derived_key, &key);
-                                let hmac_msg = serde_json::json!({
+                                let mut hmac_msg = serde_json::json!({
                                     "type": "handshake",
                                     "hmac": BASE64.encode(&hmac),
                                 });
+                                if let Some(token) = relay_auth_token.as_ref() {
+                                    hmac_msg["auth"] =
+                                        serde_json::Value::String(token.clone());
+                                }
                                 ws_send.send(text_msg(
                                     serde_json::to_string(&hmac_msg)?,
                                 ))?;

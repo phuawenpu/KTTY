@@ -855,8 +855,11 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "futures-util",
+ "hex",
  "ktty-common",
+ "rand 0.8.5",
  "serde_json",
+ "subtle",
  "tokio",
 ]
 

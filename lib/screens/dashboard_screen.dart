@@ -155,6 +155,22 @@ class _DashboardScreenState extends State<DashboardScreen> {
     final pin = _pinController.text.trim().replaceAll(RegExp(r'[^0-9]'), '');
     if (pin.isEmpty) return;
 
+    // Enforce min PIN length to match the agent. The room id is
+    // hex(Argon2id(pin)) and is visible to the relay, so a short PIN can be
+    // cracked offline by anyone watching a join. Keep this in sync with
+    // backend/agent/src/main.rs.
+    if (pin.length < 8) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('PIN must be at least 8 digits.'),
+            duration: Duration(seconds: 3),
+          ),
+        );
+      }
+      return;
+    }
+
     // Rate limiting (PWA)
     if (kIsWeb && _isLockedOut) {
       if (mounted) {
@@ -170,6 +186,22 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
     final url = _urlController.text.trim();
     if (url.isEmpty) return;
+
+    // Reject cleartext ws:// to prevent downgrade attacks. The relay-level
+    // auth token won't help against an attacker who can MITM the TCP
+    // connection — only TLS will. The agent's URL-encrypt feature can be
+    // used in front of this for an additional sealed-URL flow.
+    if (!url.startsWith('wss://')) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Relay URL must use wss:// (TLS required).'),
+            duration: Duration(seconds: 3),
+          ),
+        );
+      }
+      return;
+    }
 
     setState(() => _connecting = true);
     session.setUrl(url);

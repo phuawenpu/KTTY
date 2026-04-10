@@ -3,7 +3,7 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
     <uses-permission android:name="android.permission.RECORD_AUDIO"/>
     <application
-        android:usesCleartextTraffic="true"
+        android:usesCleartextTraffic="false"
         android:label="ktty"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">

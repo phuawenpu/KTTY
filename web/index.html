@@ -1,24 +1,33 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <!--
-    If you are serving your web app in a path other than the root, change the
-    href value below to reflect the base path you are serving from.
-
-    The path provided below has to start and end with a slash "/" in order for
-    it to work correctly.
-
-    For more details:
-    * https://developer.mozilla.org/en-US/docs/Web/HTML/Element/base
-
-    This is a placeholder for base href that will be replaced by the value of
-    the `--base-href` argument provided to `flutter build`.
-  -->
   <base href="$FLUTTER_BASE_HREF">
 
   <meta charset="UTF-8">
   <meta content="IE=Edge" http-equiv="X-UA-Compatible">
-  <meta name="description" content="A new Flutter project.">
+  <meta name="description" content="KTTY — secure mobile terminal">
+
+  <!--
+    Strict Content Security Policy. We need 'wasm-unsafe-eval' for the
+    wasm-bindgen module loader, but everything else is locked down to
+    same-origin to keep third-party scripts (extensions, bookmarklets, XSS)
+    from reaching the crypto module on `window`. `connect-src` lets the
+    Flutter client open the WSS connection to the relay.
+  -->
+  <meta http-equiv="Content-Security-Policy" content="
+    default-src 'self';
+    script-src 'self' 'wasm-unsafe-eval';
+    style-src 'self' 'unsafe-inline';
+    img-src 'self' data:;
+    font-src 'self';
+    connect-src 'self' wss://ktty-relay.fly.dev wss://*.fly.dev;
+    object-src 'none';
+    base-uri 'self';
+    frame-ancestors 'none';
+    form-action 'none';
+  ">
+  <meta http-equiv="X-Content-Type-Options" content="nosniff">
+  <meta http-equiv="Referrer-Policy" content="no-referrer">
 
   <!-- iOS meta tags & icons -->
   <meta name="mobile-web-app-capable" content="yes">
@@ -33,29 +42,33 @@
   <link rel="manifest" href="manifest.json">
 </head>
 <body>
-  <!--
-    You can customize the "flutter_bootstrap.js" script.
-    This is useful to provide a custom configuration to the Flutter loader
-    or to give the user feedback during the initialization process.
-
-    For more details:
-    * https://docs.flutter.dev/platform-integration/web/initialization
-  -->
   <script type="module">
-    // Load WASM crypto before Flutter so it's available at startup
+    // Load WASM crypto before Flutter so it's available at startup. The
+    // module is exposed on window._kttyCrypto only briefly so the Flutter
+    // engine's JS interop can find it; once Flutter has booted we drop the
+    // global so third-party scripts can't reach it.
     import init, * as crypto from './wasm/ktty_wasm_crypto.js';
-    async function loadCrypto() {
+    (async () => {
       try {
         await init();
-        window._kttyCrypto = crypto;
+        // Wrap the module so we can null it out later without affecting the
+        // copy Flutter still holds via its bound externs.
+        window._kttyCrypto = Object.freeze({
+          deriveKey: crypto.deriveKey,
+          roomId: crypto.roomId,
+          encrypt: crypto.encrypt,
+          decrypt: crypto.decrypt,
+          mlkemEncapsulate: crypto.mlkemEncapsulate,
+          computeHmac: crypto.computeHmac,
+          verifyHmac: crypto.verifyHmac,
+        });
         window._kttyCryptoReady = true;
         console.log('[KTTY] WASM crypto loaded');
       } catch (e) {
         window._kttyCryptoReady = false;
         console.error('[KTTY] WASM crypto failed:', e);
       }
-    }
-    await loadCrypto();
+    })();
   </script>
   <script src="flutter_bootstrap.js" async></script>
 </body>

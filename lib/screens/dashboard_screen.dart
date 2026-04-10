@@ -53,7 +53,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
     }
     _urlFocusNode.addListener(_onUrlFocus);
     _pinFocusNode.addListener(_onPinFocus);
-    _activeController = _urlController;
+    // On web the URL field is hidden, so the PIN field is the only thing
+    // the user can interact with — start with it as the active controller.
+    _activeController = kIsWeb ? _pinController : _urlController;
     _pingRelay();
   }
 
@@ -331,11 +333,17 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        // URL field (both platforms)
-                        TextField(
+                        // URL field — hidden on web. The PWA always uses
+                        // the default `wss://ktty-relay.fly.dev/ws` from
+                        // the controller's initial value, so the user
+                        // never has to see or edit it. On native we still
+                        // show the field so the user can point at a
+                        // self-hosted relay.
+                        if (!kIsWeb) ...[
+                          TextField(
                             controller: _urlController,
                             focusNode: _urlFocusNode,
-                            readOnly: !kIsWeb,
+                            readOnly: true,
                             showCursor: true,
                             style: const TextStyle(color: Colors.white),
                             decoration: InputDecoration(
@@ -353,7 +361,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
                               ),
                             ),
                           ),
-                        const SizedBox(height: 10),
+                          const SizedBox(height: 10),
+                        ],
                         // PIN field
                         TextField(
                           controller: _pinController,

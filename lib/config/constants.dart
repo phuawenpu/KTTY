@@ -1,10 +1,6 @@
 const int kAppVersion = 7;
 const String kAppBuildTime = String.fromEnvironment('BUILD_TIME', defaultValue: 'dev');
 
-/// Relay URL for PWA. Passed at build time: --dart-define=RELAY_URL=<url>
-/// Not shown to the user in the web interface.
-const String kRelayUrl = String.fromEnvironment('RELAY_URL', defaultValue: '');
-
 const int kTerminalMaxLines = 1000;
 const int kDefaultCols = 80;
 const int kDefaultRows = 24;

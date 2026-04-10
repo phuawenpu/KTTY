@@ -50,13 +50,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
     super.initState();
     if (!kIsWeb) {
       SystemChannels.textInput.invokeMethod('TextInput.hide');
-      _urlFocusNode.addListener(_onUrlFocus);
-      _activeController = _urlController;
-      _pingRelay();
-    } else {
-      _activeController = _pinController;
     }
+    _urlFocusNode.addListener(_onUrlFocus);
     _pinFocusNode.addListener(_onPinFocus);
+    _activeController = _urlController;
+    if (!kIsWeb) _pingRelay();
   }
 
   Future<void> _pingRelay() async {
@@ -109,18 +107,16 @@ class _DashboardScreenState extends State<DashboardScreen> {
         }
       }
     } else if (value == '\r' || value == '\n') {
-      if (!kIsWeb && _activeController == _urlController) {
+      if (_activeController == _urlController) {
         _pinFocusNode.requestFocus();
       } else {
         _connect();
       }
     } else if (value == '\t') {
-      if (!kIsWeb) {
-        if (_activeController == _urlController) {
-          _pinFocusNode.requestFocus();
-        } else {
-          _urlFocusNode.requestFocus();
-        }
+      if (_activeController == _urlController) {
+        _pinFocusNode.requestFocus();
+      } else {
+        _urlFocusNode.requestFocus();
       }
     } else if (value.codeUnitAt(0) >= 32) {
       final text = controller.text;
@@ -172,25 +168,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
       return;
     }
 
-    String url;
-    if (kIsWeb) {
-      // Use relay URL embedded at build time (not shown to user)
-      if (kRelayUrl.isEmpty) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('No relay URL configured. Rebuild with --dart-define=RELAY_URL=<url>'),
-              duration: Duration(seconds: 4),
-            ),
-          );
-        }
-        return;
-      }
-      url = kRelayUrl;
-    } else {
-      url = _urlController.text.trim();
-      if (url.isEmpty) return;
-    }
+    final url = _urlController.text.trim();
+    if (url.isEmpty) return;
 
     setState(() => _connecting = true);
     session.setUrl(url);
@@ -320,12 +299,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        // Mobile only: plaintext URL field
-                        if (!kIsWeb) ...[
-                          TextField(
+                        // URL field (both platforms)
+                        TextField(
                             controller: _urlController,
                             focusNode: _urlFocusNode,
-                            readOnly: true,
+                            readOnly: !kIsWeb,
                             showCursor: true,
                             style: const TextStyle(color: Colors.white),
                             decoration: InputDecoration(
@@ -343,9 +321,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
                               ),
                             ),
                           ),
-                          const SizedBox(height: 10),
-                        ],
-                        // PIN field (both platforms)
+                        const SizedBox(height: 10),
+                        // PIN field
                         TextField(
                           controller: _pinController,
                           focusNode: _pinFocusNode,

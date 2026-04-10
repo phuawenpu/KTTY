@@ -4,6 +4,11 @@ COPY Cargo.toml Cargo.lock ./
 COPY common/ ./common/
 COPY relay/ ./relay/
 COPY agent/ ./agent/
+# ffi-crypto is a workspace member (Flutter FFI bridge for native builds).
+# We don't actually compile it here, but cargo refuses to load the workspace
+# if a declared member's manifest is missing — so the directory has to be
+# present in the build context.
+COPY ffi-crypto/ ./ffi-crypto/
 RUN cargo build --release -p ktty-relay
 
 FROM debian:bookworm-slim

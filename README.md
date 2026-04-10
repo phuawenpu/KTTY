@@ -194,7 +194,7 @@ Other hardening in the same change set:
 | `lib/state/keyboard_state.dart` | Holds the active layer (ABC=0, 123=1, SYM=2), shift/caps state. |
 | `lib/state/viewport_state.dart` | Portrait/landscape mode for the terminal layout. |
 | `lib/screens/dashboard_screen.dart` | PIN entry + Connect button + relay reachability indicator. The WebSocket URL field is shown only on native (so the user can point at a self-hosted relay) and **hidden on web** — the PWA always uses the default `wss://ktty-relay.fly.dev/ws` from the controller's initial value. On PWA there's a 5-attempt PIN rate limiter with 30s lockout. Both platforms enforce a minimum PIN length of 8 digits and reject any URL that doesn't start with `wss://`. The connection-indicator state on web comes from a real `/health` ping (see `ping_web.dart`); on native it's a `dart:io` HttpClient ping. |
-| `lib/screens/terminal_screen.dart` | Terminal page: xterm view, custom keyboard at the bottom, swipeable control cluster, keyboard-hide toggle. |
+| `lib/screens/terminal_screen.dart` | Terminal page: appBar with status / font-size / keyboard-toggle / smart-invert / disconnect / rotate buttons, an `xterm` view, the custom keyboard at the bottom, and a swipeable control cluster. The smart-invert toggle wraps the `TerminalContainer` in a `ColorFiltered` widget with an `invert + hue-rotate(180°)` matrix so white↔black flip while red/green/yellow/blue highlights stay recognisably the same colour. The filter is scoped to the terminal subtree only — the appBar and keyboard stay dark regardless of mode. |
 | `lib/screens/ping_native.dart` | Native `HttpClient`-based relay HTTP ping (replaces `wss://` → `https://` and tries `GET /`). |
 | `lib/screens/ping_web.dart` | Web reachability probe. Calls `window.fetch` (via `dart:js_interop`) against the relay's `/health` endpoint and returns `true` on a 2xx. The relay must serve `Access-Control-Allow-Origin: *` on `/health` (it does — see `backend/relay/src/main.rs`) and the PWA's CSP `connect-src` must whitelist the relay's https origin. Selected over `ping_native.dart` via conditional import on `dart.library.js_interop`. |
 | `lib/services/crypto/native_crypto.dart` | The dispatcher. Conditional import: `native_crypto_web.dart` on web, `native_crypto_ffi.dart` on native. Exposes a single `NativeCrypto` static class so the rest of the app doesn't care which platform it's on. |
@@ -798,7 +798,29 @@ shippable. All fixed in this batch:
    extra round-trip on first paint, no more "stuck on stale build"
    failures.
 
-### Phase 9 — picking up where this left off
+### Phase 9 — smart-invert "light mode" terminal toggle
+
+Implemented the smart-invert toggle that had been sketched as a future
+plan in the README. `lib/screens/terminal_screen.dart` now carries a
+`bool _invertedTheme` plus a static `_smartInvertMatrix` and a tiny
+`_maybeInvert(child)` helper that conditionally wraps any child in a
+`ColorFiltered`. Both `TerminalContainer` build sites (the
+keyboard-visible and keyboard-hidden branches) go through that
+helper, and there's a new `IconButton` in the appBar between the
+keyboard toggle and the disconnect button. Tap it to flip between
+dark and light terminal backgrounds; ANSI colours stay
+recognisable because the matrix composes `invert(1)` with
+`hue-rotate(180°)` (the same trick CSS dark-mode shims use).
+
+The actual matrix coefficients come from the W3C `hue-rotate`
+spec with sRGB luma weights (R=0.213, G=0.715, B=0.072) at θ=180°,
+composed with a `1 - x` invert and the constant column scaled to
+Flutter's 0–255 colour-channel space. White exactly maps to black
+and black exactly maps to white; saturated reds/greens/blues
+shift slightly in luminance but remain unambiguously their original
+hue.
+
+### Phase 10 — picking up where this left off
 
 Future work is in the [Outstanding work](#outstanding-work--known-limitations)
 section below. The two big-ticket items are an HKDF-based key separation
@@ -909,67 +931,6 @@ rather than security boundaries. Tackle them in a future v3 commit:
   per N seconds per peer in `backend/agent/src/session.rs`.
 
 ### Polish
-
-- **Smart-invert "light mode" toggle for the terminal (Android, ~30
-  lines).** Add a button in the appBar that flips the terminal between
-  dark and light backgrounds *while preserving the ANSI red/green/yellow
-  highlight colours*. Don't try to swap the xterm `TerminalTheme` palette
-  by hand — instead wrap the `TerminalContainer` in a Flutter
-  `ColorFiltered` widget with a matrix that does `invert` followed by
-  `hue-rotate(180°)`. That composition has the magic property that
-  white↔black flip but every primary/secondary RGB colour comes out the
-  same: red→cyan→red, green→magenta→green, blue→yellow→blue, and so on.
-  This is the same trick iOS Smart Invert and several CSS dark-mode
-  shims use.
-
-  Sketch (`lib/screens/terminal_screen.dart`):
-
-  ```dart
-  // In _TerminalScreenState:
-  bool _invertedTheme = false;
-
-  // The combined invert + hue-rotate(180°) matrix, scaled for
-  // Flutter's 0–255 channel space. Re-derive analytically if you
-  // want exact values; these are good enough for visual smart-invert.
-  static const List<double> _smartInvertMatrix = [
-    0.39, -1.21, -0.18, 0, 255,
-   -0.21,  0.79, -0.58, 0, 255,
-   -0.21, -0.21,  0.42, 0, 255,
-    0,     0,     0,    1, 0,
-  ];
-
-  // Wrap the TerminalContainer:
-  final terminal = TerminalContainer(...);
-  final maybeInverted = _invertedTheme
-      ? ColorFiltered(
-          colorFilter: const ColorFilter.matrix(_smartInvertMatrix),
-          child: terminal,
-        )
-      : terminal;
-
-  // Add to appBar actions:
-  IconButton(
-    icon: Icon(_invertedTheme ? Icons.dark_mode : Icons.light_mode, size: 18),
-    onPressed: () => setState(() => _invertedTheme = !_invertedTheme),
-    padding: EdgeInsets.zero,
-    constraints: const BoxConstraints(),
-    tooltip: _invertedTheme ? 'Dark mode' : 'Light mode',
-  ),
-  ```
-
-  Limit the filter to the `TerminalContainer` only — do NOT wrap the
-  whole `Scaffold` or you'll invert the appBar, the keyboard, and the
-  connection indicator too. The keyboard sits outside the
-  `ColorFiltered` subtree so it stays its native dark theme regardless
-  of terminal mode.
-
-  Caveats: `ColorFiltered` forces an offscreen layer, so the terminal
-  text re-rasterises each frame instead of being cached. Cost is
-  negligible for an 80×24 grid; measure if you ever ship to desktop.
-  Persisting the toggle across sessions is one `shared_preferences`
-  call away — drop it on `SessionState` since it's already a
-  `ChangeNotifier`. Wrap the appBar button in `if (!kIsWeb)` if you
-  want it Android-only.
 
 - **Document non-overlap requirement on `ktty_mlkem_encapsulate`
   (audit L5).** Current callers always allocate three distinct buffers

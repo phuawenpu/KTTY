@@ -41,6 +41,38 @@ class _TerminalScreenState extends State<TerminalScreen> {
   // PWA: collapsible built-in keyboard (default: shown)
   bool _builtInKeyboardVisible = true;
 
+  // Smart-invert "light mode" for the terminal. When true the
+  // TerminalContainer is wrapped in a ColorFiltered widget that does
+  // invert + hue-rotate(180°), which flips white↔black while keeping
+  // saturated colours (red errors, green prompts, blue links, etc.)
+  // recognisably the same colour. Toggled by the appBar button.
+  bool _invertedTheme = false;
+
+  // Composition of `invert(1)` then `hue-rotate(180°)`, derived from
+  // the CSS spec's hue-rotate matrix with sRGB luma weights
+  // (R=0.213, G=0.715, B=0.072). Re-derive analytically if you want
+  // to tweak — these are the standard "smart invert" coefficients.
+  // The 5th column is the constant offset; for Flutter's
+  // ColorFilter.matrix the colour channels expect 0–255 there.
+  static const List<double> _smartInvertMatrix = <double>[
+     0.574, -1.430, -0.144, 0, 255,
+    -0.426, -0.430, -0.144, 0, 255,
+    -0.426, -1.430,  0.856, 0, 255,
+     0,      0,      0,     1,   0,
+  ];
+
+  Widget _maybeInvert(Widget child) {
+    if (!_invertedTheme) return child;
+    return ColorFiltered(
+      colorFilter: const ColorFilter.matrix(_smartInvertMatrix),
+      child: child,
+    );
+  }
+
+  void _toggleInvert() {
+    setState(() => _invertedTheme = !_invertedTheme);
+  }
+
   @override
   void initState() {
     super.initState();
@@ -204,6 +236,20 @@ class _TerminalScreenState extends State<TerminalScreen> {
                     : 'Show keyboard',
               ),
             if (isPortrait) const SizedBox(width: 6),
+            // Smart-invert (light/dark) toggle for the terminal panel
+            IconButton(
+              icon: Icon(
+                _invertedTheme ? Icons.dark_mode : Icons.light_mode,
+                size: 18,
+              ),
+              onPressed: _toggleInvert,
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(),
+              tooltip: _invertedTheme
+                  ? 'Switch to dark terminal'
+                  : 'Switch to light terminal',
+            ),
+            const SizedBox(width: 6),
             // Disconnect button
             IconButton(
               icon: const Icon(Icons.exit_to_app, size: 18),
@@ -232,16 +278,18 @@ class _TerminalScreenState extends State<TerminalScreen> {
                 children: [
                   Expanded(
                     flex: kPortraitTerminalFlex,
-                    child: TerminalContainer(
-                      key: _terminalKey,
-                      terminal: widget.terminalService.terminal,
-                      controller: widget.terminalService.controller,
-                      onFontSizeChanged: (size) {
-                        setState(() => _displayFontSize = size);
-                      },
-                      onWordTapped: (word) {
-                        widget.terminalService.sendText(word);
-                      },
+                    child: _maybeInvert(
+                      TerminalContainer(
+                        key: _terminalKey,
+                        terminal: widget.terminalService.terminal,
+                        controller: widget.terminalService.controller,
+                        onFontSizeChanged: (size) {
+                          setState(() => _displayFontSize = size);
+                        },
+                        onWordTapped: (word) {
+                          widget.terminalService.sendText(word);
+                        },
+                      ),
                     ),
                   ),
                   Expanded(
@@ -264,17 +312,19 @@ class _TerminalScreenState extends State<TerminalScreen> {
               )
             : Padding(
                 padding: const EdgeInsets.all(4),
-                child: TerminalContainer(
-                  key: _terminalKey,
-                  terminal: widget.terminalService.terminal,
-                  controller: widget.terminalService.controller,
-                  hardwareKeyboardOnly: true,
-                  onFontSizeChanged: (size) {
-                    setState(() => _displayFontSize = size);
-                  },
-                  onWordTapped: (word) {
-                    widget.terminalService.sendText(word);
-                  },
+                child: _maybeInvert(
+                  TerminalContainer(
+                    key: _terminalKey,
+                    terminal: widget.terminalService.terminal,
+                    controller: widget.terminalService.controller,
+                    hardwareKeyboardOnly: true,
+                    onFontSizeChanged: (size) {
+                      setState(() => _displayFontSize = size);
+                    },
+                    onWordTapped: (word) {
+                      widget.terminalService.sendText(word);
+                    },
+                  ),
                 ),
               ),
       ),

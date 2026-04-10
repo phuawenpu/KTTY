@@ -54,7 +54,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
     _urlFocusNode.addListener(_onUrlFocus);
     _pinFocusNode.addListener(_onPinFocus);
     _activeController = _urlController;
-    if (!kIsWeb) _pingRelay();
+    _pingRelay();
   }
 
   Future<void> _pingRelay() async {

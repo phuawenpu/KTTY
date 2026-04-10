@@ -1,24 +1,46 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <!--
-    If you are serving your web app in a path other than the root, change the
-    href value below to reflect the base path you are serving from.
-
-    The path provided below has to start and end with a slash "/" in order for
-    it to work correctly.
-
-    For more details:
-    * https://developer.mozilla.org/en-US/docs/Web/HTML/Element/base
-
-    This is a placeholder for base href that will be replaced by the value of
-    the `--base-href` argument provided to `flutter build`.
-  -->
   <base href="/KTTY/">
 
   <meta charset="UTF-8">
   <meta content="IE=Edge" http-equiv="X-UA-Compatible">
-  <meta name="description" content="A new Flutter project.">
+  <meta name="description" content="KTTY — secure mobile terminal">
+
+  <!--
+    Content Security Policy.
+
+    - 'wasm-unsafe-eval' is required for both wasm-bindgen (the KTTY crypto)
+      and Flutter web's canvaskit renderer.
+    - https://www.gstatic.com is required because Flutter web's canvaskit
+      renderer dynamically imports canvaskit.js and fetches canvaskit.wasm
+      from https://www.gstatic.com/flutter-canvaskit/<engineRevision>/. If
+      you remove gstatic.com from script-src or connect-src the PWA will
+      fail to render. (Bundle canvaskit locally and you can drop the
+      whitelist.)
+    - https://fonts.gstatic.com is for Material/Cupertino fallback fonts.
+    - connect-src for the relay covers wss://ktty-relay.fly.dev and any
+      other *.fly.dev relay you deploy.
+    - 'unsafe-inline' for style-src is required by Flutter's runtime CSS
+      injection. This is the only major relaxation.
+    - frame-ancestors 'none' stops the PWA being embedded in an iframe
+      (clickjacking).
+  -->
+  <meta http-equiv="Content-Security-Policy" content="
+    default-src 'self';
+    script-src 'self' 'wasm-unsafe-eval' https://www.gstatic.com;
+    style-src 'self' 'unsafe-inline';
+    img-src 'self' data: blob:;
+    font-src 'self' https://fonts.gstatic.com;
+    connect-src 'self' https://www.gstatic.com https://fonts.gstatic.com wss://ktty-relay.fly.dev wss://*.fly.dev;
+    worker-src 'self' blob:;
+    object-src 'none';
+    base-uri 'self';
+    frame-ancestors 'none';
+    form-action 'none';
+  ">
+  <meta http-equiv="X-Content-Type-Options" content="nosniff">
+  <meta http-equiv="Referrer-Policy" content="no-referrer">
 
   <!-- iOS meta tags & icons -->
   <meta name="mobile-web-app-capable" content="yes">
@@ -33,29 +55,31 @@
   <link rel="manifest" href="manifest.json">
 </head>
 <body>
-  <!--
-    You can customize the "flutter_bootstrap.js" script.
-    This is useful to provide a custom configuration to the Flutter loader
-    or to give the user feedback during the initialization process.
-
-    For more details:
-    * https://docs.flutter.dev/platform-integration/web/initialization
-  -->
   <script type="module">
-    // Load WASM crypto before Flutter so it's available at startup
+    // Load WASM crypto BEFORE flutter_bootstrap.js. The top-level `await`
+    // here is what makes that ordering work — module scripts that use
+    // top-level await block any subsequent <script> tag from executing,
+    // so flutter_bootstrap.js doesn't run until window._kttyCrypto is
+    // ready. Without this, Flutter's main.dart can call NativeCrypto
+    // before the WASM module has finished initialising and the
+    // resulting handshake produces a wrong key (looks like "wrong PIN"
+    // to the user).
     import init, * as crypto from './wasm/ktty_wasm_crypto.js';
-    async function loadCrypto() {
-      try {
-        await init();
-        window._kttyCrypto = crypto;
-        window._kttyCryptoReady = true;
-        console.log('[KTTY] WASM crypto loaded');
-      } catch (e) {
-        window._kttyCryptoReady = false;
-        console.error('[KTTY] WASM crypto failed:', e);
-      }
+    try {
+      await init();
+      // Assign the module namespace object directly. Don't try to copy
+      // the function references onto a wrapper object — the wasm-bindgen
+      // exports rely on the module-namespace identity, and a copied
+      // wrapper can produce subtly wrong results that look like a key
+      // mismatch. The CSP above is the real defence-in-depth for
+      // unwanted access to this global.
+      window._kttyCrypto = crypto;
+      window._kttyCryptoReady = true;
+      console.log('[KTTY] WASM crypto loaded');
+    } catch (e) {
+      window._kttyCryptoReady = false;
+      console.error('[KTTY] WASM crypto failed:', e);
     }
-    await loadCrypto();
   </script>
   <script src="flutter_bootstrap.js" async></script>
 </body>

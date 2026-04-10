@@ -1,7 +1,6 @@
 /* @ts-self-types="./ktty_wasm_crypto.d.ts" */
 
 /**
- * Compute HMAC-SHA256.
  * @param {Uint8Array} argon2_key
  * @param {Uint8Array} data
  * @returns {Uint8Array}
@@ -21,7 +20,6 @@ export function computeHmac(argon2_key, data) {
 }
 
 /**
- * Decrypt packed data (nonce || ciphertext || tag).
  * @param {Uint8Array} key
  * @param {Uint8Array} packed
  * @returns {Uint8Array}
@@ -41,7 +39,6 @@ export function decrypt(key, packed) {
 }
 
 /**
- * Derive a 32-byte key from PIN using Argon2id.
  * @param {string} pin
  * @returns {Uint8Array}
  */
@@ -58,8 +55,6 @@ export function deriveKey(pin) {
 }
 
 /**
- * Encrypt plaintext with XChaCha20-Poly1305.
- * Returns nonce(24) || ciphertext || tag(16).
  * @param {Uint8Array} key
  * @param {Uint8Array} plaintext
  * @returns {Uint8Array}
@@ -79,29 +74,8 @@ export function encrypt(key, plaintext) {
 }
 
 /**
- * Decapsulate: given decapsulation key (2400 bytes) + ciphertext (1088 bytes),
- * recover shared secret (32 bytes).
- * @param {Uint8Array} dk_bytes
- * @param {Uint8Array} ciphertext
- * @returns {Uint8Array}
- */
-export function mlkemDecapsulate(dk_bytes, ciphertext) {
-    const ptr0 = passArray8ToWasm0(dk_bytes, wasm.__wbindgen_malloc);
-    const len0 = WASM_VECTOR_LEN;
-    const ptr1 = passArray8ToWasm0(ciphertext, wasm.__wbindgen_malloc);
-    const len1 = WASM_VECTOR_LEN;
-    const ret = wasm.mlkemDecapsulate(ptr0, len0, ptr1, len1);
-    if (ret[3]) {
-        throw takeFromExternrefTable0(ret[2]);
-    }
-    var v3 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
-    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
-    return v3;
-}
-
-/**
- * Encapsulate: given an encapsulation key (1184 bytes), produce
- * ciphertext(1088) || shared_secret(32).
+ * Returns `ciphertext (1088 bytes) || shared_secret (32 bytes)` concatenated.
+ * The Dart caller splits the last 32 bytes off as the shared secret.
  * @param {Uint8Array} ek_bytes
  * @returns {Uint8Array}
  */
@@ -118,20 +92,6 @@ export function mlkemEncapsulate(ek_bytes) {
 }
 
 /**
- * Generate ML-KEM 768 keypair.
- * Returns decapsulation_key || encapsulation_key concatenated.
- * dk = first 2400 bytes, ek = remaining 1184 bytes.
- * @returns {Uint8Array}
- */
-export function mlkemGenerateKeypair() {
-    const ret = wasm.mlkemGenerateKeypair();
-    var v1 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
-    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
-    return v1;
-}
-
-/**
- * Generate Room ID (hex string) from a 32-byte derived key.
  * @param {Uint8Array} derived_key
  * @returns {string}
  */
@@ -157,7 +117,6 @@ export function roomId(derived_key) {
 }
 
 /**
- * Verify HMAC with constant-time comparison.
  * @param {Uint8Array} argon2_key
  * @param {Uint8Array} data
  * @param {Uint8Array} expected
@@ -180,6 +139,10 @@ export function verifyHmac(argon2_key, data, expected) {
 function __wbg_get_imports() {
     const import0 = {
         __proto__: null,
+        __wbg_Error_2e59b1b37a9a34c3: function(arg0, arg1) {
+            const ret = Error(getStringFromWasm0(arg0, arg1));
+            return ret;
+        },
         __wbg___wbindgen_is_function_49868bde5eb1e745: function(arg0) {
             const ret = typeof(arg0) === 'function';
             return ret;

@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 import 'package:cryptography/cryptography.dart';
 import 'package:pqcrypto/pqcrypto.dart' as pqcrypto;
+import 'package:pqcrypto/src/algos/kyber/kem.dart' show KyberLevel;
 
 const _staticSalt = 'KTTY STATIC SALT VERSION 1';
 const _argon2MCost = 65536; // 64 MB
@@ -69,7 +70,7 @@ Future<Uint8List> decrypt(Uint8List key, Uint8List packed) async {
 }
 
 Future<(Uint8List, Uint8List)> mlkemEncapsulate(Uint8List ekBytes) async {
-  final kem = pqcrypto.KyberKem(pqcrypto.KyberLevel.kem768);
+  final kem = pqcrypto.KyberKem(KyberLevel.kem768);
   final (ct, ss) = kem.encapsulate(ekBytes);
   return (ct, ss);
 }

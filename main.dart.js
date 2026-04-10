@@ -79903,7 +79903,7 @@ r.a0$=0
 s.w.l()
 s.x.l()
 s.aE()},
-K(a){var s,r=this,q="assets/ktty_logo.png",p=null,o=t.E,n=A.aui(B.Ui,B.oM,A.hz(A.c([A.arm(q,24),B.ie,B.a6G,B.Ac,A.dr("v7 ",p,p,p,B.CG,p,p)],o),B.a_,B.a9,B.bi),p,40),m=A.ma(p,A.dP(A.arm(q,240),B.r,B.oE,p,p,p,p,p),p,p,0,0,8,p),l=A.c([],o),k=r.e,j=r.r,i=!j,h=A.xR(p,p,A.j5(j?B.Jd:B.Jc,B.cE,p,20),p,p,new A.ahK(r),p,p,p)
+K(a){var s,r=this,q="assets/ktty_logo.png",p=null,o=t.E,n=A.aui(B.Ui,B.oM,A.hz(A.c([A.arm(q,24),B.ie,B.a6G,B.Ac,A.dr("v7 2026-04-10 08:33 UTC",p,p,p,B.CG,p,p)],o),B.a_,B.a9,B.bi),p,40),m=A.ma(p,A.dP(A.arm(q,240),B.r,B.oE,p,p,p,p,p),p,p,0,0,8,p),l=A.c([],o),k=r.e,j=r.r,i=!j,h=A.xR(p,p,A.j5(j?B.Jd:B.Jc,B.cE,p,20),p,p,new A.ahK(r),p,p,p)
 j=A.avH(p,p,p,p,p,p,p,p,!0,new A.fU(4,B.d5,new A.b_(r.y===k?B.ck:B.oL,1,B.v,-1)),p,p,p,p,p,p,p,p,p,p,p,B.WR,p,p,p,p,p,p,p,p,p,p,p,p,p,p,p,p,p,B.a4i,"PIN",!0,!0,!1,p,p,p,p,p,p,p,p,h,p,p,p,p,p)
 h=i?B.Ad:B.Ae
 s=i?B.Af:B.Ag

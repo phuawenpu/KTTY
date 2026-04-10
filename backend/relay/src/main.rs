@@ -123,10 +123,17 @@ async fn main() {
 
 async fn health_handler(_rooms: RoomMap) -> impl IntoResponse {
     // Don't leak room/peer counts to anonymous probers — Fly's healthcheck
-    // only needs a 2xx + a content-type.
+    // only needs a 2xx + a content-type. The CORS header lets the PWA's
+    // dashboard reachability probe succeed when called from a different
+    // origin (e.g. https://phuawenpu.github.io). The body is not
+    // sensitive — it's a literal "{}" — so a wildcard origin is fine.
     (
         axum::http::StatusCode::OK,
-        [("content-type", "application/json")],
+        [
+            ("content-type", "application/json"),
+            ("access-control-allow-origin", "*"),
+            ("cache-control", "no-store"),
+        ],
         "{\"status\":\"ok\"}",
     )
 }

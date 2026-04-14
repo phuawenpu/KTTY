@@ -51,6 +51,13 @@ pub fn room_id(derived_key: &[u8; 32]) -> String {
     hex::encode(derived_key)
 }
 
+/// Derive a short, stable session identifier from the negotiated session key.
+/// This is carried in every encrypted envelope so peers can drop stale packets
+/// from an older handshake before attempting decryption.
+pub fn session_id(session_key: &[u8; 32]) -> String {
+    hex::encode(&session_key[..8])
+}
+
 /// Encrypt plaintext with XChaCha20-Poly1305.
 /// Returns: nonce (24 bytes) || ciphertext || tag (16 bytes).
 /// Must match Flutter's `CryptoService.encrypt` packing format.

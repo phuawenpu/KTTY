@@ -91,9 +91,10 @@ class TerminalService {
   final WebSocketService _ws;
   StreamSubscription? _wsSubscription;
   int _seq = 0;
-  bool _plainFallback = false;
+  int _lastGoodSeq = 0;
   Timer? _resizeDebounce;
   bool _firstResize = true;
+  bool _syncRecoveryInFlight = false;
 
   /// Public stats accumulator. Read by the info dialog.
   final TerminalStats stats = TerminalStats();
@@ -131,8 +132,9 @@ class TerminalService {
 
   void attach({bool syncExisting = false}) {
     stats.markSessionStart();
-    _plainFallback = false;
     _predictedEcho.clear();
+    _syncRecoveryInFlight = false;
+    _lastGoodSeq = 0;
 
     // Terminal output (user keystrokes) → local echo + batched send
     terminal.onOutput = (data) {
@@ -231,23 +233,33 @@ class TerminalService {
   Future<void> _sendPty(List<int> data) async {
     _seq++;
     stats.noteSent(data.length);
-    if (_ws.isEncrypted && !_plainFallback) {
-      try {
-        await _ws.sendEncrypted(_seq, 'pty', data);
-      } catch (_) {
-        _plainFallback = true;
-        _sendPlain(data);
-      }
-    } else {
-      _sendPlain(data);
+    try {
+      await _ws.sendEncrypted(_seq, 'pty', data);
+    } catch (e) {
+      print('[KTTY] Failed to send encrypted PTY packet: $e');
+      _scheduleSyncRecovery('encrypted PTY send failed');
     }
   }
 
-  void _sendPlain(List<int> data) {
-    _ws.sendJson({
-      'seq': _seq,
-      'type': 'pty',
-      'payload': base64Encode(data),
+  bool _looksLikeEnvelope(String raw) {
+    final trimmed = raw.trimLeft();
+    return trimmed.startsWith('{') &&
+        (trimmed.contains('"payload"') ||
+            trimmed.contains('"type"') ||
+            trimmed.contains('"seq"'));
+  }
+
+  void _scheduleSyncRecovery(String reason) {
+    if (_syncRecoveryInFlight) return;
+    _syncRecoveryInFlight = true;
+    _predictedEcho.clear();
+    print('[KTTY] Scheduling sync recovery: $reason');
+    Future.microtask(() async {
+      try {
+        await _requestSync();
+      } finally {
+        _syncRecoveryInFlight = false;
+      }
     });
   }
 
@@ -255,6 +267,7 @@ class TerminalService {
     try {
       final json = jsonDecode(raw) as Map<String, dynamic>;
       final type = json['type'] as String?;
+      final envelopeSessionId = json['session_id'] as String?;
 
       // Skip handshake/boot messages — these are internal handshake signals,
       // not terminal data. The boot signal arrives during normal reconnection.
@@ -264,19 +277,30 @@ class TerminalService {
       if (json['action'] == 'join') return;
 
       if (type == 'pty') {
+        final currentSessionId = _ws.sessionId;
+        if (envelopeSessionId == null || currentSessionId == null) {
+          print('[KTTY] Dropping PTY packet with missing session ID');
+          _scheduleSyncRecovery('missing session ID on PTY packet');
+          return;
+        }
+        if (envelopeSessionId != currentSessionId) {
+          print(
+            '[KTTY] Dropping stale PTY packet from session $envelopeSessionId '
+            '(current $currentSessionId)',
+          );
+          _scheduleSyncRecovery('stale PTY session ID');
+          return;
+        }
+
         final payload = json['payload'] as String;
         List<int> bytes;
 
-        if (_ws.isEncrypted) {
-          try {
-            bytes = await _ws.decryptPayload(payload);
-          } catch (_) {
-            // Decryption failed — switch to plain mode
-            _plainFallback = true;
-            bytes = base64Decode(payload);
-          }
-        } else {
-          bytes = base64Decode(payload);
+        try {
+          bytes = await _ws.decryptPayload(payload);
+        } catch (e) {
+          print('[KTTY] Dropping PTY packet after decrypt failure: $e');
+          _scheduleSyncRecovery('PTY decrypt failed');
+          return;
         }
 
         stats.noteReceived(bytes.length);
@@ -291,15 +315,35 @@ class TerminalService {
 
         // Track the agent's outgoing seq (used for sync_req replays)
         final seq = json['seq'] as int?;
-        if (seq != null) _seq = seq;
+        if (seq != null) {
+          _lastGoodSeq = seq;
+          if (seq > _seq) _seq = seq;
+        }
       } else if (type == 'sync_warn') {
+        final currentSessionId = _ws.sessionId;
+        if (envelopeSessionId == null || currentSessionId == null) {
+          print('[KTTY] Dropping sync warning with missing session ID');
+          _scheduleSyncRecovery('missing session ID on sync warning');
+          return;
+        }
+        if (envelopeSessionId != currentSessionId) {
+          print(
+            '[KTTY] Dropping stale sync warning from session $envelopeSessionId '
+            '(current $currentSessionId)',
+          );
+          _scheduleSyncRecovery('stale sync warning session ID');
+          return;
+        }
+
         final payload = json['payload'] as String;
         List<int> bytes;
 
-        if (_ws.isEncrypted) {
+        try {
           bytes = await _ws.decryptPayload(payload);
-        } else {
-          bytes = base64Decode(payload);
+        } catch (e) {
+          print('[KTTY] Dropping sync warning after decrypt failure: $e');
+          _scheduleSyncRecovery('sync warning decrypt failed');
+          return;
         }
 
         final syncData = jsonDecode(utf8.decode(bytes)) as Map<String, dynamic>;
@@ -312,23 +356,20 @@ class TerminalService {
           '\r\n*** DATA LOSS WARNING: Sequences $droppedStart-$droppedEnd dropped ***\r\n',
         );
       }
-    } catch (_) {
-      // Fallback: write raw text
+    } catch (e) {
+      if (_looksLikeEnvelope(raw)) {
+        print('[KTTY] Dropping malformed relay envelope: $e');
+        _scheduleSyncRecovery('malformed relay envelope');
+        return;
+      }
       terminal.write(raw);
     }
   }
 
   Future<void> sendResize(int cols, int rows) async {
     final payload = utf8.encode(jsonEncode({'cols': cols, 'rows': rows}));
-    if (_ws.isEncrypted) {
-      _seq++;
-      await _ws.sendEncrypted(_seq, 'resize', payload);
-    } else {
-      _ws.sendJson({
-        'type': 'resize',
-        'payload': base64Encode(payload),
-      });
-    }
+    _seq++;
+    await _ws.sendEncrypted(_seq, 'resize', payload);
   }
 
   /// Re-attach after an auto-reconnect. Silently re-establishes the
@@ -340,15 +381,15 @@ class TerminalService {
       attach(syncExisting: true);
       return;
     }
-    _plainFallback = false;
+    _syncRecoveryInFlight = false;
     _predictedEcho.clear();
     _requestSync();
   }
 
   Future<void> _requestSync() async {
     try {
-      await _ws.sendSyncRequest(_seq);
-      print('[KTTY] Sync request sent (last_seq=$_seq)');
+      await _ws.sendSyncRequest(_lastGoodSeq);
+      print('[KTTY] Sync request sent (last_good_seq=$_lastGoodSeq)');
     } catch (e) {
       print('[KTTY] Failed to send sync request: $e');
     }

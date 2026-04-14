@@ -296,12 +296,14 @@ impl Session {
                         continue;
                     }
                 };
+            let session_id = crypto::session_id(&session_key);
             eprintln!("[agent] Handshake complete, encrypted mode");
 
             // Bridge PTY ↔ WS with this session's key
             let exit = self
                 .bridge_loop(
                     &session_key,
+                    &session_id,
                     &ws_send_tx,
                     &mut ws_rx,
                     &mut pty_data_rx,
@@ -345,6 +347,7 @@ impl Session {
     async fn bridge_loop<R>(
         &self,
         key: &[u8; 32],
+        session_id: &str,
         ws_send: &mpsc::UnboundedSender<Message>,
         ws_rx: &mut R,
         pty_rx: &mut mpsc::UnboundedReceiver<Vec<u8>>,
@@ -382,7 +385,7 @@ impl Session {
                             match crypto::encrypt(key, &data) {
                                 Ok(enc) => {
                                     let env = EncryptedEnvelope::new(
-                                        s, "pty", BASE64.encode(&enc),
+                                        s, session_id, "pty", BASE64.encode(&enc),
                                     )
                                     .with_auth(auth.clone());
                                     let json = serde_json::to_string(&env)
@@ -447,6 +450,14 @@ impl Session {
                                     }
                                 };
 
+                            if env.session_id != session_id {
+                                eprintln!(
+                                    "[agent] Dropping stale-session envelope seq={} type={} session={} current={}",
+                                    env.seq, env.r#type, env.session_id, session_id
+                                );
+                                continue;
+                            }
+
                             let encrypted = match BASE64.decode(&env.payload) {
                                 Ok(d) => d,
                                 Err(e) => {
@@ -487,7 +498,7 @@ impl Session {
                                 }
                                 "sync_req" => {
                                     self.handle_sync_req(
-                                        key, ws_send, ring_buf, auth, &plain,
+                                        key, session_id, ws_send, ring_buf, auth, &plain,
                                     );
                                 }
                                 other => {
@@ -539,16 +550,27 @@ impl Session {
     fn handle_sync_req(
         &self,
         key: &[u8; 32],
+        session_id: &str,
         ws_send: &mpsc::UnboundedSender<Message>,
         ring_buf: &Arc<std::sync::Mutex<crate::ring_buffer::RingBuffer>>,
         auth: &Option<String>,
         plain: &[u8],
     ) {
-        let sync_data = match serde_json::from_slice::<serde_json::Value>(plain) {
+        let sync_data = match serde_json::from_slice::<SyncReqPayload>(plain) {
             Ok(d) => d,
-            Err(_) => return,
+            Err(e) => {
+                eprintln!("[agent] Invalid sync request payload: {e}");
+                return;
+            }
         };
-        let last_seq = sync_data["last_seq"].as_u64().unwrap_or(0);
+        if sync_data.session_id != session_id {
+            eprintln!(
+                "[agent] Dropping stale sync request for session {} (current {})",
+                sync_data.session_id, session_id
+            );
+            return;
+        }
+        let last_seq = sync_data.last_seq;
         eprintln!("[agent] Sync request: last_seq={last_seq}");
 
         let rb = ring_buf.lock().unwrap();
@@ -560,7 +582,7 @@ impl Session {
             let warn = serde_json::json!({"dropped_start": start, "dropped_end": end});
             let warn_bytes = serde_json::to_vec(&warn).unwrap_or_default();
             if let Ok(enc) = crypto::encrypt(key, &warn_bytes) {
-                let env = EncryptedEnvelope::new(0, "sync_warn", BASE64.encode(&enc))
+                let env = EncryptedEnvelope::new(0, session_id, "sync_warn", BASE64.encode(&enc))
                     .with_auth(auth.clone());
                 let _ = ws_send
                     .send(text_msg(serde_json::to_string(&env).unwrap_or_default()));
@@ -571,7 +593,7 @@ impl Session {
         eprintln!("[agent] Replaying {} packets", packets.len());
         for pkt in packets {
             if let Ok(enc) = crypto::encrypt(key, &pkt.payload) {
-                let env = EncryptedEnvelope::new(pkt.seq, &pkt.msg_type, BASE64.encode(&enc))
+                let env = EncryptedEnvelope::new(pkt.seq, session_id, &pkt.msg_type, BASE64.encode(&enc))
                     .with_auth(auth.clone());
                 let _ = ws_send
                     .send(text_msg(serde_json::to_string(&env).unwrap_or_default()));

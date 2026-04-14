@@ -24,6 +24,7 @@ class WebSocketService {
   String? _lastPin;
   bool _autoReconnectEnabled = false;
   String? _relayAuthToken;
+  String? _sessionId;
 
   ConnectionStateCallback? onConnectionChanged;
   VoidCallback? onReconnected;
@@ -31,6 +32,15 @@ class WebSocketService {
   Stream<String> get messages => _messageController.stream;
   bool get isConnected => _channel != null;
   bool get isEncrypted => _crypto != null;
+  String? get sessionId => _sessionId;
+
+  String _deriveSessionId(Uint8List sessionKey) {
+    final buf = StringBuffer();
+    for (final b in sessionKey.take(8)) {
+      buf.write(b.toRadixString(16).padLeft(2, '0'));
+    }
+    return buf.toString();
+  }
 
   Future<void> connect(String url) async {
     _cancelReconnect();
@@ -75,6 +85,8 @@ class WebSocketService {
   void _handleDisconnect() {
     print('[KTTY-WS] Disconnected (autoReconnect=$_autoReconnectEnabled, hasUrl=${_lastUrl != null}, hasPin=${_lastPin != null})');
     _channel = null;
+    _crypto = null;
+    _sessionId = null;
     _relayAuthToken = null;
     onConnectionChanged?.call(false);
     if (_autoReconnectEnabled) {
@@ -110,6 +122,7 @@ class WebSocketService {
     _channel?.sink.close();
     _channel = null;
     _crypto = null;
+    _sessionId = null;
     _relayAuthToken = null;
   }
 
@@ -234,6 +247,7 @@ class WebSocketService {
     }
 
     _crypto = CryptoService(ss);
+    _sessionId = _deriveSessionId(ss);
     print('[KTTY-WS] Handshake verified, encrypted mode');
   }
 
@@ -245,9 +259,13 @@ class WebSocketService {
     if (_crypto == null) {
       throw StateError('Handshake not completed');
     }
+    if (_sessionId == null) {
+      throw StateError('Session ID not established');
+    }
     final encrypted = await _crypto!.encrypt(payload);
     sendJson({
       'seq': seq,
+      'session_id': _sessionId,
       'type': type,
       'payload': base64Encode(encrypted),
     });
@@ -264,10 +282,17 @@ class WebSocketService {
 
   /// Send sync request on reconnect.
   Future<void> sendSyncRequest(int lastSeq) async {
-    final payload = utf8.encode(jsonEncode({'last_seq': lastSeq}));
-    if (_crypto != null) {
-      await sendEncrypted(lastSeq, 'sync_req', payload);
+    if (_crypto == null) {
+      throw StateError('Handshake not completed');
     }
+    if (_sessionId == null) {
+      throw StateError('Session ID not established');
+    }
+    final payload = utf8.encode(jsonEncode({
+      'last_seq': lastSeq,
+      'session_id': _sessionId,
+    }));
+    await sendEncrypted(lastSeq, 'sync_req', payload);
   }
 
   void send(String data) {
@@ -287,6 +312,9 @@ class WebSocketService {
     _subscription = null;
     _channel?.sink.close();
     _channel = null;
+    _crypto = null;
+    _sessionId = null;
+    _relayAuthToken = null;
   }
 
   void disconnect() {
@@ -298,6 +326,7 @@ class WebSocketService {
     } catch (_) {}
     _cleanupChannel();
     _crypto = null;
+    _sessionId = null;
     _relayAuthToken = null;
     _lastUrl = null;
     _lastPin = null;

@@ -45,6 +45,7 @@ pub struct HandshakeReply {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct EncryptedEnvelope {
     pub seq: u64,
+    pub session_id: String,
     pub r#type: String,
     pub payload: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -52,9 +53,15 @@ pub struct EncryptedEnvelope {
 }
 
 impl EncryptedEnvelope {
-    pub fn new(seq: u64, msg_type: &str, payload_b64: String) -> Self {
+    pub fn new(
+        seq: u64,
+        session_id: &str,
+        msg_type: &str,
+        payload_b64: String,
+    ) -> Self {
         Self {
             seq,
+            session_id: session_id.to_string(),
             r#type: msg_type.to_string(),
             payload: payload_b64,
             auth: None,
@@ -93,6 +100,7 @@ pub struct ResizePayload {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SyncReqPayload {
     pub last_seq: u64,
+    pub session_id: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -117,6 +125,7 @@ pub struct RawMessage {
     pub mlkem_pub_key: Option<String>,
     pub mlkem_ciphertext: Option<String>,
     pub seq: Option<u64>,
+    pub session_id: Option<String>,
     pub payload: Option<String>,
     pub hmac: Option<String>,
 }

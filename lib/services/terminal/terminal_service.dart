@@ -129,8 +129,10 @@ class TerminalService {
     _inputFlushTimer ??= Timer(_inputFlushInterval, _flushInput);
   }
 
-  void attach() {
+  void attach({bool syncExisting = false}) {
     stats.markSessionStart();
+    _plainFallback = false;
+    _predictedEcho.clear();
 
     // Terminal output (user keystrokes) → local echo + batched send
     terminal.onOutput = (data) {
@@ -181,6 +183,10 @@ class TerminalService {
     _wsSubscription = _ws.messages.listen((raw) {
       _handleMessage(raw);
     });
+
+    if (syncExisting) {
+      _requestSync();
+    }
   }
 
   void _flushInput() {
@@ -331,8 +337,10 @@ class TerminalService {
   /// while sync restores the current state in the background.
   void reattachAfterReconnect() {
     if (terminal.onOutput == null) {
-      attach();
+      attach(syncExisting: true);
+      return;
     }
+    _plainFallback = false;
     _predictedEcho.clear();
     _requestSync();
   }

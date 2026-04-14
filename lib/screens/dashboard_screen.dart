@@ -228,7 +228,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       await widget.wsService.performHandshake(pin);
 
       widget.terminalService.terminal.write('\x1b[2J\x1b[H');
-      widget.terminalService.attach();
+      widget.terminalService.attach(syncExisting: true);
       session.setStatus(ConnectionStatus.connected);
 
       if (mounted) {

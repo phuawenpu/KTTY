@@ -178,6 +178,7 @@ Other hardening in the same change set:
 | `.gitignore` | Ignores Flutter build dirs, Rust `target/`, Android SDK/NDK, escape-sequence junk files left by detached terminals. |
 | `build-agent.sh` | Copies the pre-built `backend/target/release/ktty-agent` binary to `../ktty-agent` for distribution. |
 | `build-crypto.sh` | **The build script you'll use most.** Cross-compiles `ktty-ffi-crypto` for all four Android ABIs into `android/app/src/main/jniLibs/<abi>/`, and runs `wasm-pack build` for `ktty-wasm-crypto` into `web/wasm/`. Requires Rust + `cargo-ndk` + `wasm-pack` + Android NDK. |
+| `run-agent/` | Self-contained runner for the agent host. Contains `ktty-agent` (prebuilt Linux x86_64 binary, path-remapped) and `deploy-ktty-agent.sh` (prompts for PIN, points at the default fly.io relay). `cd run-agent && ./deploy-ktty-agent.sh` — that's the whole workflow on a fresh machine. |
 | `README.md` | This file. |
 
 ### Flutter app — `lib/`
@@ -207,8 +208,8 @@ Other hardening in the same change set:
 | `lib/services/websocket/ws_connect.dart` | Native WebSocket connect using `dart:io` `WebSocket` (no SSL cert override anymore — relay has a real cert). |
 | `lib/services/websocket/ws_connect_web.dart` | Web WebSocket connect using `WebSocketChannel.connect`. Conditional-imported. |
 | `lib/services/websocket/message_codec.dart` | JSON encode/decode helpers for the message envelopes. |
-| `lib/services/terminal/terminal_service.dart` | Glues `xterm.dart` to the WS service. Local echo prediction (echoes printable keystrokes immediately, suppresses the duplicate when the server replays them), 50ms keystroke batching, ring-buffer sync request after reconnect, plain-text fallback when crypto isn't established. Also defines `TerminalStats`: a rolling-window (default 100 samples) counter of keystroke round-trip latencies plus cumulative bytes-sent / bytes-received / message counters and session-start timestamp. RTT is measured by hooking the local-echo predictor: each `_EchoEntry` carries the predicted-at timestamp, and when the matching byte arrives back from the server we feed `now - sentTimeMs` into the rolling buffer. This gives a true end-to-end keystroke latency measurement. The stats are surfaced to the user by the `_StatsDialog` in `terminal_screen.dart`. |
-| `lib/widgets/terminal/terminal_container.dart` | xterm wrapper with pinch zoom (2-pointer gesture), drag-to-select, double-tap word capture. |
+| `lib/services/terminal/terminal_service.dart` | Glues `xterm.dart` to the WS service. Local echo prediction (echoes printable keystrokes immediately, suppresses the duplicate when the server replays them), 50ms keystroke batching, ring-buffer sync request after reconnect. Every frame on the WS is expected to be JSON; any parse failure is logged + triggers `_scheduleSyncRecovery` and is never written to the terminal (this closes the "stray `\"payload\":...`" leak). Pinch lifecycle hooks (`notifyPinchStart`/`notifyPinchEnd`) suppress PTY resize messages while the user is actively pinching and flush one coalesced resize on scale-end, so TUI apps repaint once instead of per intermediate font size. Also defines `TerminalStats`: a rolling-window (default 100 samples) counter of keystroke round-trip latencies plus cumulative bytes-sent / bytes-received / message counters and session-start timestamp. RTT is measured by hooking the local-echo predictor: each `_EchoEntry` carries the predicted-at timestamp, and when the matching byte arrives back from the server we feed `now - sentTimeMs` into the rolling buffer. This gives a true end-to-end keystroke latency measurement. The stats are surfaced to the user by the `_StatsDialog` in `terminal_screen.dart`. |
+| `lib/widgets/terminal/terminal_container.dart` | xterm wrapper with pinch zoom (2-pointer gesture), drag-to-select, double-tap word capture. Font size is owned by the container; a `fontSizeNotifier` (ValueNotifier) lets the AppBar readout rebuild live via `ValueListenableBuilder` without pulling the whole `TerminalScreen` into setState. During a pinch we update the container but do **not** notify the parent per frame — notifying parent per frame was the cause of the "zoom hangs under TUI" bug, since `TerminalScreen.setState` rebuilds the entire screen (keyboard subtree included) and xterm's autoResize recomputes grid metrics every frame. Parent callback fires only on scale-end, explicit zoom buttons, and the first auto-size. Sub-pixel pinch deltas (<0.5 px) are ignored. |
 | `lib/widgets/terminal/connection_indicator.dart` | Two related widgets sharing one `statusColor(status, relayReachable)` helper: `ConnectionIndicator` is an 8×8 coloured dot, and `KttyTitle` is the word **KTTY** rendered in the same colour. The previous "Connected" / "Disconnected" text label was removed because it overlapped the font-size +/- buttons on a 360-dp portrait phone — the colour-coded title now carries the status instead. Red = disconnected, orange = connecting, yellow = handshake/sync, blue = relay reachable but idle, green = fully connected. |
 | `lib/widgets/terminal/selection_handles.dart` | Android-style teardrop selection handles overlay with a Copy button. |
 | `lib/widgets/keyboard/custom_keyboard.dart` | The on-screen keyboard. Three layers (ABC, 123, SYM) plus a swipe drawer for arrows/function keys. Sends keys via a callback to `terminal_service`. |
@@ -217,7 +218,7 @@ Other hardening in the same change set:
 | `lib/widgets/keyboard/key_definitions.dart` | The actual key layouts for ABC/123/SYM and the function-key drawer. |
 | `lib/widgets/keyboard/control_cluster.dart` | Top row of the in-app keyboard: `Tab Esc Ctrl CAPS ↑ ↓ ← → ⌨`. (Tab and Esc are in this order — Tab gets the leftmost slot because it's the more common key.) The single `CAPS` key replaces the previous `ab`/`Aa` pair (one-shot shift is still available via the up-arrow on the qwerty bottom row). The keyboard-hide icon at the right end is a duplicate of the appBar's keyboard toggle, kept here for thumb-reachability. |
 | `lib/widgets/clipboard/clipboard_buttons.dart` | Copy + Paste icon buttons in the keyboard toolbar row. Paste sends text via `sendText` directly (not as fake keystrokes). The previous Mark Start / Mark End buttons (which toggled an explicit selection mode) are gone — xterm's drag-to-select gives the same selection workflow with no extra UI. |
-| `lib/mock/mock_ws_server.dart` | In-process mock relay for unit tests. |
+| `lib/mock/mock_ws_server.dart` | Standalone dev-only WebSocket server (`dart run lib/mock/mock_ws_server.dart`). Accepts `join`, replies with a `boot` signal. Does **not** implement the ML-KEM handshake (no Rust FFI here) so it's only useful for smoke-testing connect/reconnect plumbing. Not wired into any test. |
 
 ### Native cdylib — `backend/ffi-crypto/`
 
@@ -304,15 +305,20 @@ in `backend/common/`, `backend/ffi-crypto/`, or `backend/wasm-crypto/`.
 Stock Flutter Linux runner. Not the focus of this project but compiles
 because the cdylib is built for x86_64 too.
 
-### Tests — `tests/mlkem_interop/`
+### Tests — `test/` and `tests/`
 
-The standalone interop test that *proved* `package:pqcrypto` and
-`ml-kem 0.2` were not interoperable. Kept around as documentation.
+Flutter tests live under `test/` (the standard Dart convention — this is
+what `flutter test` runs). Standalone interop and e2e helpers live under
+`tests/`.
 
 | Path | Purpose |
 |---|---|
+| `test/terminal_service_payload_test.dart` | Unit tests for `TerminalService._handleMessage` and the `looksLikeWireFragment` guardrail. Regression coverage for the "stray `\"payload\":...`" leak — every parse failure must drop + trigger sync recovery, never `terminal.write(raw)`. |
+| `test/terminal_container_zoom_test.dart` | Widget tests for `TerminalContainer` pinch behaviour. Verifies that `onFontSizeChanged` does NOT fire per pinch frame (only on scale-end + explicit zoom buttons), that `onPinchStart`/`onPinchEnd` fire exactly once per gesture, and that `fontSizeNotifier` advances on zoom. Regression coverage for "zoom hangs under TUI". |
+| `test/widget_test.dart` | Leftover Flutter scaffold smoke test from `flutter create`. Imports a `MyApp` constructor that never existed in this repo — it's been broken since the first commit. Delete or replace when convenient; unrelated to the real test suite. |
+| `tests/cdp_drive.dart` | Chrome DevTools Protocol driver used during local e2e verification of the PWA. Connects to a headless browser on `127.0.0.1:9222`, checks the DOM for any leaked `"payload"` strings, and captures a screenshot. Run manually; not part of `flutter test`. |
 | `tests/mlkem_interop/rust_baseline/src/main.rs` | Rust binary that generates an ML-KEM-768 keypair, encapsulates a shared secret, prints all values as hex. |
-| `tests/mlkem_interop/dart_test/bin/dart_test.dart` | Dart program that takes the same key + ciphertext from the Rust side and tries to decapsulate them with `package:pqcrypto`. The shared secrets do not match. The diagnostic prints: *"The Dart pqcrypto package produces different shared secrets than Rust ml-kem... You must use FFI bindings to the same Rust crate."* |
+| `tests/mlkem_interop/dart_test/bin/dart_test.dart` | Dart program that takes the same key + ciphertext from the Rust side and tries to decapsulate them with `package:pqcrypto`. The shared secrets do not match. The diagnostic prints: *"The Dart pqcrypto package produces different shared secrets than Rust ml-kem... You must use FFI bindings to the same Rust crate."* Kept around as documentation of why the ffi-crypto/wasm-crypto shims exist. |
 
 ---
 
@@ -442,22 +448,52 @@ cargo run --release -p ktty-relay -- 8080
 
 ### Step 2 — Linux agent on your host
 
+The fastest path is the `run-agent/` runner — the repo ships a prebuilt
+Linux x86_64 binary and a thin wrapper that prompts for the PIN and
+points at the default fly.io relay:
+
 ```bash
-./backend/target/release/ktty-agent --relay-url wss://ktty-relay.fly.dev/ws
-# or use a local relay:
-./backend/target/release/ktty-agent --relay-url ws://localhost:8080/ws
-# or set via env:
-KTTY_RELAY_URL=wss://ktty-relay.fly.dev/ws ./ktty-agent
+cd run-agent
+./deploy-ktty-agent.sh
+# → "Enter PIN (8+ digits):" then runs against wss://ktty-relay.fly.dev/ws
 ```
 
-It will print `Enter PIN (8+ digits):`. **Minimum is 8 digits** — the agent
-will refuse anything shorter (see threat model). It runs Argon2id (a few
-seconds) and confirms the digit count without printing the PIN itself. Then
-it spawns a tmux session called `ktty` and waits for a Flutter client to
-join.
+Non-interactive / custom-relay variants:
 
-A pre-built copy of the binary is dropped at `../ktty-agent` (relative to
-the workspace) by `./build-agent.sh`.
+```bash
+KTTY_PIN=12345678 ./run-agent/deploy-ktty-agent.sh
+KTTY_RELAY_URL=ws://127.0.0.1:8080/ws ./run-agent/deploy-ktty-agent.sh
+```
+
+If you prefer raw invocation or you're on a non-x86_64 host, build and
+run the agent directly:
+
+```bash
+cargo build --release -p ktty-agent
+./backend/target/release/ktty-agent --relay-url wss://ktty-relay.fly.dev/ws
+```
+
+**Minimum PIN is 8 digits** — the agent refuses anything shorter (see
+threat model). It runs Argon2id (a few seconds), confirms the digit
+count without printing the PIN itself, spawns a tmux session called
+`ktty`, and waits for a Flutter client to join.
+
+If you rebuild the agent yourself, refresh the committed runner binary
+with path-remapping (so your `$HOME` doesn't end up in debug strings):
+
+```bash
+RUSTFLAGS="--remap-path-prefix=$HOME=/h \
+           --remap-path-prefix=$PWD=/ktty \
+           --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo \
+           --remap-path-prefix=${RUSTUP_HOME:-$HOME/.rustup}=/rustup" \
+  cargo build --release -p ktty-agent --manifest-path backend/Cargo.toml
+cp backend/target/release/ktty-agent run-agent/ktty-agent
+```
+
+A thinner legacy script `./build-agent.sh` also exists — it copies the
+binary one directory *up* from the repo (`../ktty-agent`). The
+`run-agent/` location is preferred going forward because it keeps
+everything inside the repo.
 
 ### Step 3 — Flutter client
 
@@ -542,6 +578,8 @@ service worker aggressively caches `main.dart.js` and `index.html`.
 | Agent prints `No agent found` from the Flutter side | Wrong PIN, agent not running, or agent on a different relay URL. | Confirm both sides use the same relay URL and the same PIN digits. The room id is `hex(argon2(pin))` — both must compute to the same string. |
 | Connection drops after backgrounding the phone for >2min | Expected. The Flutter app suppresses reconnects in the background to save battery; on resume it does a seamless reconnect via `sync_req` so you shouldn't see a flash. If you do, check `lib/app.dart`'s lifecycle handler. |
 | Relay returns 502 | Fly machine is sleeping. `auto_start_machines = true` brings it back on the next request — just retry. |
+| UI hangs briefly during pinch-zoom on a TUI (vim, htop, less) | Was a live bug; fixed in Phase 11. If you still see it, check that `TerminalScreen` is not calling `setState` on every `onFontSizeChanged` — the fix routes live font-size updates through a `ValueNotifier` instead, and only fires the parent callback on scale-end. |
+| Occasional `"payload":"..."` fragment appears in the terminal mid-session | Was a live bug; fixed in Phase 11. The `terminal.write(raw)` fallback in `_handleMessage` was removed — every WS frame is JSON by spec now, and any parse failure logs + triggers sync recovery instead of leaking. If the symptom returns, `looksLikeWireFragment` in `terminal_service.dart` is the guardrail; the unit tests in `test/terminal_service_payload_test.dart` cover the path. |
 
 ---
 
@@ -554,6 +592,15 @@ service worker aggressively caches `main.dart.js` and `index.html`.
 # Edit Rust message types in `messages.rs` → also update the Dart models in
 #                                            lib/models/message_envelope.dart
 #                                            and lib/services/websocket/message_codec.dart
+
+# Run the Flutter unit + widget tests before committing UI/service changes:
+flutter test                              # runs everything under test/
+# See specifically:
+#   test/terminal_service_payload_test.dart — envelope-leak regression
+#   test/terminal_container_zoom_test.dart  — pinch-zoom behaviour
+
+# Crypto-side tests:
+cargo test -p ktty-common                 # ML-KEM roundtrip + primitives
 ```
 
 The Argon2 parameters in `backend/common/src/constants.rs` and the matching
@@ -752,7 +799,7 @@ but cargo needs the manifest present.
   with `--relay-url wss://ktty-relay.fly.dev/ws` (or set the
   `KTTY_RELAY_URL` env var). Use a PIN of 8 or more digits.
 
-### Phase 8 — UI polish, PWA UX, and the long tail of CDN/SW caching
+### Phase 7 — UI polish, PWA UX, and the long tail of CDN/SW caching
 
 The PWA was technically working after Phases 5–6 but had a string of
 small UX problems that needed cleanup before it could be considered
@@ -798,7 +845,7 @@ shippable. All fixed in this batch:
    extra round-trip on first paint, no more "stuck on stale build"
    failures.
 
-### Phase 9 — smart-invert "light mode" terminal toggle
+### Phase 8 — smart-invert "light mode" terminal toggle
 
 Implemented the smart-invert toggle that had been sketched as a future
 plan in the README. `lib/screens/terminal_screen.dart` now carries a
@@ -820,7 +867,7 @@ and black exactly maps to white; saturated reds/greens/blues
 shift slightly in luminance but remain unambiguously their original
 hue.
 
-### Phase 10 — header de-clash, status-coloured title, stats popup, Tab/Esc swap
+### Phase 9 — header de-clash, status-coloured title, stats popup, Tab/Esc swap
 
 Three independent UI changes that all landed in the same commit
 (`da51c1ed2`):
@@ -870,7 +917,58 @@ Three independent UI changes that all landed in the same commit
    row because it's the more common key. New row:
    `Tab Esc Ctrl CAPS ↑ ↓ ← → ⌨`.
 
-### Phase 11 — picking up where this left off
+### Phase 10 — encrypted-session recovery hardening + TUI PWA re-entry
+
+Two reliability fixes that landed close together:
+
+1. **Encrypted session recovery.** When the WS drops mid-session, the
+   agent and client both preserve their PTY/session state (the ring
+   buffer on the agent side, `_lastGoodSeq` on the client side). The
+   recovery path was rewritten so the client's `sync_req` replay is
+   only trusted once the new session has established a working
+   envelope decrypt — previously a half-handshake could leave the
+   bridge stuck in a sync-retry loop.
+2. **TUI restore on PWA re-entry.** After the PWA was backgrounded
+   (iOS/Android swap the tab, Chrome tab-throttles the WS), returning
+   to the tab used to redraw a blank terminal before xterm replayed
+   the buffer. The lifecycle handler now re-attaches *before* the
+   first paint and requests sync in the background, so the last
+   known screen stays visible while fresh data streams in.
+
+### Phase 11 — reliability: zoom hang + envelope fragment leak
+
+Two user-reported reliability bugs surfaced on both Android and PWA;
+both fixed in this batch:
+
+1. **Zoom hangs during TUI.** A pinch fired `onFontSizeChanged` on
+   every scale frame (~60 Hz), which called `setState` on the parent
+   `TerminalScreen`, which rebuilt the whole screen subtree (keyboard
+   included). Combined with xterm's per-frame grid recompute and the
+   TUI repaint triggered by each intermediate resize, the UI
+   effectively stalled under pinch. Fix: a `fontSizeNotifier` on the
+   container lets the AppBar size readout rebuild live without
+   pulling the parent into `setState`; parent callback fires only on
+   scale-end, explicit zoom buttons, and the first auto-size; sub-pixel
+   deltas (<0.5 px) are ignored; and new `notifyPinchStart`/
+   `notifyPinchEnd` hooks on `TerminalService` hold back PTY resize
+   messages during the gesture and flush one coalesced resize on
+   release, so the agent repaints the TUI once instead of per
+   intermediate font size.
+2. **Stray `"payload":"..."` text in the terminal.** `_handleMessage`
+   had a fallback `terminal.write(raw)` branch for frames that
+   failed `jsonDecode`. The heuristic that guarded it required the
+   raw to lead with `{`, so partial or prefix-stripped envelope
+   fragments leaked straight onto the user's screen. Fix: removed
+   the raw-write fallback entirely (every WS frame is JSON by
+   spec); every parse failure now logs with a preview and triggers
+   sync recovery. `looksLikeWireFragment` was also widened to match
+   fragments without a leading brace.
+
+Regression coverage: `test/terminal_service_payload_test.dart`
+(9 cases) and `test/terminal_container_zoom_test.dart` (4 cases).
+All 13 green; run with `flutter test`.
+
+### Phase 12 — picking up where this left off
 
 Future work is in the [Outstanding work](#outstanding-work--known-limitations)
 section below. The two big-ticket items are an HKDF-based key separation
@@ -1602,13 +1700,13 @@ its lockfiles. They're currently gitignored.
 1. Check `tests/mlkem_interop/dart_test/.gitignore` — it has `pubspec.lock`
    in it (from the standard Dart `.gitignore` template). For *bin*
    crates the lock file should be committed; only *library* crates
-   should ignore it. The interop test is a bin crate, so:
+   should ignore it. The interop test is a bin crate, so (run from the
+   repo root):
    ```bash
-   cd tests/mlkem_interop/dart_test
-   sed -i '/^pubspec.lock$/d' .gitignore  # remove the ignore
-   cd /home/pan/Code4/KTTY/workspace
+   sed -i '/^pubspec.lock$/d' tests/mlkem_interop/dart_test/.gitignore
    dart pub get --directory tests/mlkem_interop/dart_test
-   git add tests/mlkem_interop/dart_test/.gitignore tests/mlkem_interop/dart_test/pubspec.lock
+   git add tests/mlkem_interop/dart_test/.gitignore \
+           tests/mlkem_interop/dart_test/pubspec.lock
    ```
 2. Same dance for the Rust baseline:
    ```bash
@@ -1634,28 +1732,28 @@ both still work.
 #### 13. Repo layout cleanup — move toolchains out of the repo root
 
 **Goal:** Stop the repo root from doubling as the developer's
-project home. Today `flutter/`, `android-sdk/`, `.cargo/`,
-`.rustup/`, `.npm-global/`, `.fly/`, `.config/`, etc. all live
-inside the repo (gitignored). One careless `git clean -fdx` would
-delete all of those.
+project home. On some historical setups `flutter/`, `android-sdk/`,
+`.cargo/`, `.rustup/`, `.npm-global/`, `.fly/`, `.config/`, etc.
+ended up inside the repo (gitignored). One careless `git clean -fdx`
+would delete all of those.
 
 **Files:** the repo root `.gitignore` would shrink considerably,
 but no source files change. This is mostly a filesystem reorg.
 
 **Steps:**
-1. Make a new directory **outside** the repo:
+1. Make a new directory **outside** the repo — e.g. a sibling
+   `tools/` directory, or `~/ktty-tools/`. The exact path depends
+   on where you keep your workspaces.
+2. Move the toolchains there (run from the repo root):
    ```bash
-   mkdir -p ~/Code4/KTTY-tools
-   ```
-2. Move the toolchains there:
-   ```bash
-   cd /home/pan/Code4/KTTY/workspace
+   TOOLS=~/ktty-tools
+   mkdir -p "$TOOLS"
    for d in flutter android-sdk .cargo .rustup .npm-global .fly .config .cache; do
-     [ -e "$d" ] && mv "$d" ~/Code4/KTTY-tools/
+     [ -e "$d" ] && mv "$d" "$TOOLS/"
    done
    ```
-3. Add `~/Code4/KTTY-tools/flutter/bin` etc. to your shell's PATH
-   (or symlink them into `~/.local/bin` / `/usr/local/bin`).
+3. Add `$TOOLS/flutter/bin` etc. to your shell's PATH (or symlink
+   them into `~/.local/bin` / `/usr/local/bin`).
 4. Update the **Build environment expectations** table in `README.md`
    to reflect the new paths.
 5. Strip the now-unused entries from `.gitignore`:
@@ -1676,15 +1774,14 @@ but no source files change. This is mostly a filesystem reorg.
    ktty-common` from the repo root with the new PATH — both must
    still work.
 
-**Verify:** `ls -la /home/pan/Code4/KTTY/workspace` should show
-only source directories (`backend/`, `lib/`, `web/`, `android/`,
-`linux/`, `tests/`, etc.) plus the small top-level files
-(`README.md`, `pubspec.yaml`, etc.). No tooling directories.
+**Verify:** `ls -la` at the repo root should show only source
+directories (`backend/`, `lib/`, `web/`, `android/`, `linux/`,
+`tests/`, etc.) plus the small top-level files (`README.md`,
+`pubspec.yaml`, etc.). No tooling directories.
 
 **Caveat:** This is a destructive-feeling operation even though
-it's just `mv`. Take a backup of the workspace first
-(`tar czf ~/ktty-backup.tar.gz workspace/`) so a rollback is one
-`tar xzf` away.
+it's just `mv`. Take a backup first (`tar czf ~/ktty-backup.tar.gz
+.`) so a rollback is one `tar xzf` away.
 
 ---
 

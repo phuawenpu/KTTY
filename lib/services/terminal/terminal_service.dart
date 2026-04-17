@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:xterm/xterm.dart';
 import '../../config/constants.dart';
 import '../websocket/websocket_service.dart';
@@ -95,6 +96,13 @@ class TerminalService {
   Timer? _resizeDebounce;
   bool _firstResize = true;
   bool _syncRecoveryInFlight = false;
+  // Pinch state bridges the TerminalContainer gesture handler into
+  // the resize debouncer: while the user is actively pinching we
+  // stretch the debounce so we don't ship a resize (and trigger a
+  // TUI-wide repaint) for every intermediate font size.
+  bool _pinchActive = false;
+  int? _pendingResizeCols;
+  int? _pendingResizeRows;
 
   /// Public stats accumulator. Read by the info dialog.
   final TerminalStats stats = TerminalStats();
@@ -166,12 +174,20 @@ class TerminalService {
     // Forward terminal resize events to backend PTY.
     // First resize sent immediately (critical for TUI apps like Claude Code);
     // subsequent resizes debounced to avoid flooding during drag/zoom.
+    // During pinch we stash the latest size and wait for notifyPinchEnd
+    // — every intermediate font size during a pinch would otherwise
+    // repaint the whole TUI grid on the agent side.
     terminal.onResize = (width, height, pixelWidth, pixelHeight) {
       if (width <= 0 || height <= 0) return;
       if (_firstResize) {
         _firstResize = false;
         print('[KTTY] Initial resize: ${width}x$height');
         sendResize(width, height);
+        return;
+      }
+      if (_pinchActive) {
+        _pendingResizeCols = width;
+        _pendingResizeRows = height;
         return;
       }
       _resizeDebounce?.cancel();
@@ -241,18 +257,33 @@ class TerminalService {
     }
   }
 
-  bool _looksLikeEnvelope(String raw) {
-    final trimmed = raw.trimLeft();
-    return trimmed.startsWith('{') &&
-        (trimmed.contains('"payload"') ||
-            trimmed.contains('"type"') ||
-            trimmed.contains('"seq"'));
+  /// Guardrail: everything on this WebSocket is JSON (envelopes,
+  /// handshake, boot, auth). If we ever fail to parse a frame we
+  /// treat it as a wire-layer bug and trigger sync recovery — we
+  /// must never write the raw text into the terminal, because a
+  /// fragment that starts `"payload":"..."` would otherwise leak
+  /// straight onto the user's screen. Kept as a method so tests
+  /// can exercise the fragment detection without rebuilding the
+  /// whole envelope.
+  static bool looksLikeWireFragment(String raw) {
+    final trimmed = raw.trim();
+    if (trimmed.isEmpty) return false;
+    // Full or partial JSON object.
+    if (trimmed.startsWith('{') || trimmed.startsWith('[')) return true;
+    // Any fragment that carries a KTTY envelope key is a partial
+    // frame, even without the leading brace.
+    return trimmed.contains('"payload"') ||
+        trimmed.contains('"type"') ||
+        trimmed.contains('"seq"') ||
+        trimmed.contains('"session_id"') ||
+        trimmed.contains('"auth"');
   }
 
   void _scheduleSyncRecovery(String reason) {
     if (_syncRecoveryInFlight) return;
     _syncRecoveryInFlight = true;
     _predictedEcho.clear();
+    _lastSyncRecoveryReason = reason;
     print('[KTTY] Scheduling sync recovery: $reason');
     Future.microtask(() async {
       try {
@@ -262,6 +293,16 @@ class TerminalService {
       }
     });
   }
+
+  /// Most recent reason passed to [_scheduleSyncRecovery]. Exposed
+  /// for tests; null if no recovery has ever fired.
+  String? _lastSyncRecoveryReason;
+
+  @visibleForTesting
+  String? get lastSyncRecoveryReasonForTesting => _lastSyncRecoveryReason;
+
+  @visibleForTesting
+  Future<void> handleMessageForTesting(String raw) => _handleMessage(raw);
 
   Future<void> _handleMessage(String raw) async {
     try {
@@ -357,12 +398,19 @@ class TerminalService {
         );
       }
     } catch (e) {
-      if (_looksLikeEnvelope(raw)) {
-        print('[KTTY] Dropping malformed relay envelope: $e');
-        _scheduleSyncRecovery('malformed relay envelope');
-        return;
+      // Every frame on this WS is supposed to be JSON. We used to
+      // fall back to `terminal.write(raw)` for non-envelope text,
+      // but that leaked partial envelope fragments like
+      // `"payload":"..."` into the terminal. Now we drop + recover
+      // on any parse failure, which is safe because no legitimate
+      // terminal output ever arrives outside an encrypted envelope.
+      final preview = raw.length > 80 ? '${raw.substring(0, 80)}…' : raw;
+      if (looksLikeWireFragment(raw)) {
+        print('[KTTY] Dropping malformed relay envelope: $e (preview: $preview)');
+      } else {
+        print('[KTTY] Dropping non-JSON WS frame: $e (preview: $preview)');
       }
-      terminal.write(raw);
+      _scheduleSyncRecovery('malformed WS frame');
     }
   }
 
@@ -370,6 +418,36 @@ class TerminalService {
     final payload = utf8.encode(jsonEncode({'cols': cols, 'rows': rows}));
     _seq++;
     await _ws.sendEncrypted(_seq, 'resize', payload);
+  }
+
+  /// Called by the TerminalContainer when a pinch gesture begins.
+  /// While pinching, we hold back PTY resize messages — the agent
+  /// would otherwise repaint the full TUI grid on every intermediate
+  /// font size.
+  void notifyPinchStart() {
+    _pinchActive = true;
+    _resizeDebounce?.cancel();
+    _pendingResizeCols = null;
+    _pendingResizeRows = null;
+  }
+
+  /// Called by the TerminalContainer when the pinch ends. Flushes
+  /// any resize we stashed during the gesture in a single message.
+  void notifyPinchEnd() {
+    _pinchActive = false;
+    final cols = _pendingResizeCols;
+    final rows = _pendingResizeRows;
+    _pendingResizeCols = null;
+    _pendingResizeRows = null;
+    if (cols == null || rows == null) return;
+    // Use the same debounce as the normal path so a flurry of
+    // onResize callbacks that land between pinch-end and the first
+    // frame coalesce, but kick it off right away.
+    _resizeDebounce?.cancel();
+    _resizeDebounce = Timer(const Duration(milliseconds: 50), () {
+      print('[KTTY] Post-pinch resize: ${cols}x$rows');
+      sendResize(cols, rows);
+    });
   }
 
   /// Re-attach after an auto-reconnect. Silently re-establishes the

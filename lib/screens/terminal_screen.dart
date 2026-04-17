@@ -33,6 +33,10 @@ class TerminalScreen extends StatefulWidget {
 
 class _TerminalScreenState extends State<TerminalScreen> {
   final _terminalKey = GlobalKey<TerminalContainerState>();
+  // Persisted font size: updated only on scale-end / explicit zoom
+  // buttons / auto-size. Live pinch feedback goes through the
+  // TerminalContainer's fontSizeNotifier instead, so the full screen
+  // doesn't rebuild per pinch frame.
   double _displayFontSize = 14.0;
 
   // Speech-to-text
@@ -237,12 +241,9 @@ class _TerminalScreenState extends State<TerminalScreen> {
             }),
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 2),
-              child: Text(
-                '${_displayFontSize.round()}',
-                style: const TextStyle(
-                  color: Colors.white38,
-                  fontSize: 10,
-                ),
+              child: _FontSizeReadout(
+                fallback: _displayFontSize,
+                notifier: _terminalKey.currentState?.fontSizeNotifier,
               ),
             ),
             _buildHeaderButton(Icons.add, () {
@@ -328,6 +329,8 @@ class _TerminalScreenState extends State<TerminalScreen> {
                         onWordTapped: (word) {
                           widget.terminalService.sendText(word);
                         },
+                        onPinchStart: widget.terminalService.notifyPinchStart,
+                        onPinchEnd: widget.terminalService.notifyPinchEnd,
                       ),
                     ),
                   ),
@@ -363,6 +366,8 @@ class _TerminalScreenState extends State<TerminalScreen> {
                     onWordTapped: (word) {
                       widget.terminalService.sendText(word);
                     },
+                    onPinchStart: widget.terminalService.notifyPinchStart,
+                    onPinchEnd: widget.terminalService.notifyPinchEnd,
                   ),
                 ),
               ),
@@ -523,6 +528,33 @@ class _StatsDialogState extends State<_StatsDialog> {
           child: const Text('Close', style: TextStyle(color: Colors.blueAccent)),
         ),
       ],
+    );
+  }
+}
+
+/// Tiny AppBar readout that rebuilds from the TerminalContainer's
+/// fontSizeNotifier (not the screen's own setState). During a pinch
+/// this means only this little text node rebuilds per frame, not the
+/// entire TerminalScreen subtree — which is what made TUI zoom feel
+/// like it was hanging.
+///
+/// Uses [fallback] while the notifier is not yet available (first
+/// frame, before the GlobalKey has attached).
+class _FontSizeReadout extends StatelessWidget {
+  final double fallback;
+  final ValueNotifier<double>? notifier;
+
+  const _FontSizeReadout({required this.fallback, required this.notifier});
+
+  @override
+  Widget build(BuildContext context) {
+    const style = TextStyle(color: Colors.white38, fontSize: 10);
+    if (notifier == null) {
+      return Text('${fallback.round()}', style: style);
+    }
+    return ValueListenableBuilder<double>(
+      valueListenable: notifier!,
+      builder: (_, size, __) => Text('${size.round()}', style: style),
     );
   }
 }

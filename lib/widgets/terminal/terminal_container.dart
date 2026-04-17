@@ -11,6 +11,11 @@ class TerminalContainer extends StatefulWidget {
   final ValueChanged<double>? onFontSizeChanged;
   final ValueChanged<String>? onWordTapped;
   final bool hardwareKeyboardOnly;
+  // Pinch lifecycle hooks so the TerminalService can hold off PTY
+  // resize messages while the user is actively pinching. Optional:
+  // container works standalone (e.g. in widget tests) if unset.
+  final VoidCallback? onPinchStart;
+  final VoidCallback? onPinchEnd;
 
   const TerminalContainer({
     super.key,
@@ -19,6 +24,8 @@ class TerminalContainer extends StatefulWidget {
     this.onFontSizeChanged,
     this.onWordTapped,
     this.hardwareKeyboardOnly = true,
+    this.onPinchStart,
+    this.onPinchEnd,
   });
 
   @override
@@ -30,16 +37,26 @@ class TerminalContainerState extends State<TerminalContainer> {
   bool _autoSized = false;
   double _pinchBaseFontSize = _defaultFontSize;
   int _pointerCount = 0;
+  bool _pinching = false;
   DateTime? _lastTapTime;
   CellOffset? _lastTapCell;
+  // Live font-size broadcast for tiny UI elements (e.g. the AppBar
+  // size readout) that want to rebuild on every pinch frame without
+  // pulling the whole TerminalScreen into a setState cycle.
+  final ValueNotifier<double> fontSizeNotifier =
+      ValueNotifier<double>(_defaultFontSize);
 
   static const double _minFontSize = 6.0;
   static const double _maxFontSize = 24.0;
   static const double _defaultFontSize = 14.0;
   static const double _charWidthRatio = 0.6;
   static const int _targetMinCols = 80;
+  // Ignore sub-pixel pinch noise so we don't rebuild every frame for
+  // imperceptible changes. 0.5 px ≈ one render hint; below that, skip.
+  static const double _pinchEpsilon = 0.5;
 
   double get fontSize => _fontSize;
+  bool get isPinching => _pinching;
 
   double _autoFontSize(double availableWidth) {
     final ideal = availableWidth / (_targetMinCols * _charWidthRatio);
@@ -47,17 +64,32 @@ class TerminalContainerState extends State<TerminalContainer> {
   }
 
   void zoomIn() {
-    setState(() {
-      _fontSize = (_fontSize + 1.0).clamp(_minFontSize, _maxFontSize);
-    });
-    widget.onFontSizeChanged?.call(_fontSize);
+    _setFontSize(_fontSize + 1.0, notify: true);
   }
 
   void zoomOut() {
-    setState(() {
-      _fontSize = (_fontSize - 1.0).clamp(_minFontSize, _maxFontSize);
-    });
-    widget.onFontSizeChanged?.call(_fontSize);
+    _setFontSize(_fontSize - 1.0, notify: true);
+  }
+
+  /// Update local font size. [notify] controls whether the parent is
+  /// informed — we pass `false` per-frame during pinch (to avoid
+  /// rebuilding the whole TerminalScreen 60×/s) and `true` on scale-end,
+  /// explicit zoom buttons, and auto-sizing.
+  void _setFontSize(double next, {required bool notify}) {
+    final clamped = next.clamp(_minFontSize, _maxFontSize);
+    if (clamped == _fontSize) {
+      if (notify) widget.onFontSizeChanged?.call(_fontSize);
+      return;
+    }
+    setState(() => _fontSize = clamped);
+    fontSizeNotifier.value = clamped;
+    if (notify) widget.onFontSizeChanged?.call(_fontSize);
+  }
+
+  @override
+  void dispose() {
+    fontSizeNotifier.dispose();
+    super.dispose();
   }
 
   /// Extract word at given cell offset from terminal buffer.
@@ -134,6 +166,7 @@ class TerminalContainerState extends State<TerminalContainer> {
               if (!_autoSized) {
                 _autoSized = true;
                 _fontSize = _autoFontSize(constraints.maxWidth);
+                fontSizeNotifier.value = _fontSize;
                 WidgetsBinding.instance.addPostFrameCallback((_) {
                   widget.onFontSizeChanged?.call(_fontSize);
                 });
@@ -146,15 +179,26 @@ class TerminalContainerState extends State<TerminalContainer> {
                   onScaleStart: (_) {
                     if (_pointerCount >= 2) {
                       _pinchBaseFontSize = _fontSize;
+                      _pinching = true;
+                      widget.onPinchStart?.call();
                     }
                   },
                   onScaleUpdate: (details) {
                     if (_pointerCount < 2) return;
-                    setState(() {
-                      _fontSize = (_pinchBaseFontSize * details.scale)
-                          .clamp(_minFontSize, _maxFontSize);
-                    });
-                    widget.onFontSizeChanged?.call(_fontSize);
+                    final next = _pinchBaseFontSize * details.scale;
+                    // During pinch we update the container but do NOT
+                    // notify the parent — that would rebuild the whole
+                    // TerminalScreen every frame. Parent sees the final
+                    // value on scale-end.
+                    if ((next - _fontSize).abs() < _pinchEpsilon) return;
+                    _setFontSize(next, notify: false);
+                  },
+                  onScaleEnd: (_) {
+                    if (_pinching) {
+                      _pinching = false;
+                      widget.onFontSizeChanged?.call(_fontSize);
+                      widget.onPinchEnd?.call();
+                    }
                   },
                   child: TerminalView(
                     widget.terminal,

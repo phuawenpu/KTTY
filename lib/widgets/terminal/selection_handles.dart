@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:xterm/xterm.dart';
+import '../../services/terminal/clipboard_text.dart';
 
 /// Android-style teardrop selection handles overlaid on the terminal.
 /// Appears when xterm's internal long-press or double-tap selects text.
@@ -10,14 +11,16 @@ class SelectionHandlesOverlay extends StatefulWidget {
   final Terminal terminal;
   final TerminalController controller;
   final double fontSize;
-  final double charWidthRatio;
+  final double charWidth;
+  final double lineHeight;
 
   const SelectionHandlesOverlay({
     super.key,
     required this.terminal,
     required this.controller,
     required this.fontSize,
-    required this.charWidthRatio,
+    required this.charWidth,
+    required this.lineHeight,
   });
 
   @override
@@ -48,21 +51,26 @@ class _SelectionHandlesOverlayState extends State<SelectionHandlesOverlay> {
     super.dispose();
   }
 
-  double get _charWidth => widget.fontSize * widget.charWidthRatio;
-  double get _lineHeight => widget.fontSize * 1.2;
+  double get _charWidth => widget.charWidth;
+  double get _lineHeight => widget.lineHeight;
 
   /// Convert terminal cell offset to pixel offset relative to the terminal view.
+  /// Note: `cell.y` is an *absolute* buffer row (scrollback + viewport).
+  /// We only render handles for the viewport portion of the selection, so
+  /// subtract the buffer's scroll offset first.
   Offset _cellToPixel(CellOffset cell) {
+    final buffer = widget.terminal.buffer;
+    final viewportY = cell.y - (buffer.height - buffer.viewHeight);
     return Offset(
       cell.x * _charWidth,
-      cell.y * _lineHeight,
+      viewportY * _lineHeight,
     );
   }
 
   void _onCopy() {
     final sel = widget.controller.selection;
     if (sel == null) return;
-    final text = widget.terminal.buffer.getText(sel).trim();
+    final text = extractSelectionText(widget.terminal, sel);
     if (text.isNotEmpty) {
       Clipboard.setData(ClipboardData(text: text));
       print('[KTTY] Copied: "${text.length > 50 ? '${text.substring(0, 50)}...' : text}"');

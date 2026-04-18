@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:xterm/xterm.dart';
@@ -90,6 +91,39 @@ class TerminalContainerState extends State<TerminalContainer> {
   void dispose() {
     fontSizeNotifier.dispose();
     super.dispose();
+  }
+
+  /// Measure the actual pixel size of a single monospace cell at the
+  /// given font size, using the same technique xterm.dart uses in its
+  /// internal `calcCharSize` (a ParagraphBuilder over a long run of
+  /// `m`s, divided by the run length). This lets SelectionHandlesOverlay
+  /// position handles under the glyph they refer to on any platform
+  /// without us hand-tuning the 0.6/1.2 ratios per font.
+  Size _measureCellSize(double fontSize) {
+    const sample = 'mmmmmmmmmm';
+    final style = ui.TextStyle(
+      fontSize: fontSize,
+      fontFamily: 'RobotoMono',
+      fontFamilyFallback: const [
+        'Roboto Mono',
+        'Consolas',
+        'Menlo',
+        'Liberation Mono',
+        'monospace',
+      ],
+    );
+    final paragraphStyle = ui.ParagraphStyle(
+      textDirection: TextDirection.ltr,
+    );
+    final builder = ui.ParagraphBuilder(paragraphStyle)
+      ..pushStyle(style)
+      ..addText(sample);
+    final paragraph = builder.build()
+      ..layout(const ui.ParagraphConstraints(width: double.infinity));
+    return Size(
+      paragraph.maxIntrinsicWidth / sample.length,
+      paragraph.height,
+    );
   }
 
   /// Extract word at given cell offset from terminal buffer.
@@ -207,6 +241,14 @@ class TerminalContainerState extends State<TerminalContainer> {
                     hardwareKeyboardOnly: widget.hardwareKeyboardOnly,
                     autofocus: false,
                     autoResize: true,
+                    // SafeArea already wraps the Scaffold, so the
+                    // MediaQuery padding default would be zero anyway
+                    // on phones in portrait, but we pin it explicitly.
+                    // Otherwise SelectionHandlesOverlay — which uses
+                    // the terminal's own (0, 0) as its origin — would
+                    // drift by however much TerminalView inset its
+                    // content on notch / status-bar devices.
+                    padding: EdgeInsets.zero,
                     onTapUp: _handleTapUp,
                     textStyle: TerminalStyle(
                       fontSize: _fontSize,
@@ -225,13 +267,24 @@ class TerminalContainerState extends State<TerminalContainer> {
             },
           ),
         ),
-        // Selection handles overlay
+        // Selection handles overlay. We measure the actual character
+        // cell with the same Paragraph-layout method xterm.dart uses
+        // internally (see xterm's char_metrics.dart) so handle pixel
+        // positions match what TerminalView paints. The old code
+        // multiplied fontSize by fixed ratios (0.6 / 1.2) which drifts
+        // noticeably by the 20th column on RobotoMono.
         if (widget.controller != null)
-          SelectionHandlesOverlay(
-            terminal: widget.terminal,
-            controller: widget.controller!,
-            fontSize: _fontSize,
-            charWidthRatio: _charWidthRatio,
+          Builder(
+            builder: (context) {
+              final metrics = _measureCellSize(_fontSize);
+              return SelectionHandlesOverlay(
+                terminal: widget.terminal,
+                controller: widget.controller!,
+                fontSize: _fontSize,
+                charWidth: metrics.width,
+                lineHeight: metrics.height,
+              );
+            },
           ),
         // Resize overlay
         if (isResizing)

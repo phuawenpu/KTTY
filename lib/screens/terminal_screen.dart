@@ -343,7 +343,7 @@ class _TerminalScreenState extends State<TerminalScreen> {
                       onGetSelectedText: _getSelectedText,
                       onPaste: (text) {
                         print('[KTTY] Pasting ${text.length} chars');
-                        widget.terminalService.sendText(text);
+                        widget.terminalService.pastePlainText(text);
                       },
                       onMicPressed: kIsWeb ? null : _toggleSpeech,
                       isListening: _isListening,

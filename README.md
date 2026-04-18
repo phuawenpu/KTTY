@@ -176,7 +176,6 @@ Other hardening in the same change set:
 | `analysis_options.yaml` | Dart lints. |
 | `.metadata` | Flutter scaffolding metadata (don't edit). |
 | `.gitignore` | Ignores Flutter build dirs, Rust `target/`, Android SDK/NDK, escape-sequence junk files left by detached terminals. |
-| `build-agent.sh` | Copies the pre-built `backend/target/release/ktty-agent` binary to `../ktty-agent` for distribution. |
 | `build-crypto.sh` | **The build script you'll use most.** Cross-compiles `ktty-ffi-crypto` for all four Android ABIs into `android/app/src/main/jniLibs/<abi>/`, and runs `wasm-pack build` for `ktty-wasm-crypto` into `web/wasm/`. Requires Rust + `cargo-ndk` + `wasm-pack` + Android NDK. |
 | `run-agent/` | Self-contained runner for the agent host. Contains `ktty-agent` (prebuilt Linux x86_64 binary, path-remapped) and `deploy-ktty-agent.sh` (prompts for PIN, points at the default fly.io relay). `cd run-agent && ./deploy-ktty-agent.sh` — that's the whole workflow on a fresh machine. |
 | `README.md` | This file. |
@@ -208,10 +207,11 @@ Other hardening in the same change set:
 | `lib/services/websocket/ws_connect.dart` | Native WebSocket connect using `dart:io` `WebSocket` (no SSL cert override anymore — relay has a real cert). |
 | `lib/services/websocket/ws_connect_web.dart` | Web WebSocket connect using `WebSocketChannel.connect`. Conditional-imported. |
 | `lib/services/websocket/message_codec.dart` | JSON encode/decode helpers for the message envelopes. |
-| `lib/services/terminal/terminal_service.dart` | Glues `xterm.dart` to the WS service. Local echo prediction (echoes printable keystrokes immediately, suppresses the duplicate when the server replays them), 50ms keystroke batching, ring-buffer sync request after reconnect. Every frame on the WS is expected to be JSON; any parse failure is logged + triggers `_scheduleSyncRecovery` and is never written to the terminal (this closes the "stray `\"payload\":...`" leak). Pinch lifecycle hooks (`notifyPinchStart`/`notifyPinchEnd`) suppress PTY resize messages while the user is actively pinching and flush one coalesced resize on scale-end, so TUI apps repaint once instead of per intermediate font size. Also defines `TerminalStats`: a rolling-window (default 100 samples) counter of keystroke round-trip latencies plus cumulative bytes-sent / bytes-received / message counters and session-start timestamp. RTT is measured by hooking the local-echo predictor: each `_EchoEntry` carries the predicted-at timestamp, and when the matching byte arrives back from the server we feed `now - sentTimeMs` into the rolling buffer. This gives a true end-to-end keystroke latency measurement. The stats are surfaced to the user by the `_StatsDialog` in `terminal_screen.dart`. |
-| `lib/widgets/terminal/terminal_container.dart` | xterm wrapper with pinch zoom (2-pointer gesture), drag-to-select, double-tap word capture. Font size is owned by the container; a `fontSizeNotifier` (ValueNotifier) lets the AppBar readout rebuild live via `ValueListenableBuilder` without pulling the whole `TerminalScreen` into setState. During a pinch we update the container but do **not** notify the parent per frame — notifying parent per frame was the cause of the "zoom hangs under TUI" bug, since `TerminalScreen.setState` rebuilds the entire screen (keyboard subtree included) and xterm's autoResize recomputes grid metrics every frame. Parent callback fires only on scale-end, explicit zoom buttons, and the first auto-size. Sub-pixel pinch deltas (<0.5 px) are ignored. |
+| `lib/services/terminal/terminal_service.dart` | Glues `xterm.dart` to the WS service. Local echo prediction (echoes printable keystrokes immediately, suppresses the duplicate when the server replays them), 50ms keystroke batching, ring-buffer sync request after reconnect. Every frame on the WS is expected to be JSON; any parse failure is logged + triggers `_scheduleSyncRecovery` and is never written to the terminal (this closes the "stray `\"payload\":...`" leak). Pinch lifecycle hooks (`notifyPinchStart`/`notifyPinchEnd`) suppress PTY resize messages while the user is actively pinching and flush one coalesced resize on scale-end, so TUI apps repaint once instead of per intermediate font size. `getSelectedText()` and `pastePlainText()` delegate to `clipboard_text.dart` for clipboard-safe extraction and bracketed-paste-aware injection. Also defines `TerminalStats`: a rolling-window (default 100 samples) counter of keystroke round-trip latencies plus cumulative bytes-sent / bytes-received / message counters and session-start timestamp. RTT is measured by hooking the local-echo predictor: each `_EchoEntry` carries the predicted-at timestamp, and when the matching byte arrives back from the server we feed `now - sentTimeMs` into the rolling buffer. This gives a true end-to-end keystroke latency measurement. The stats are surfaced to the user by the `_StatsDialog` in `terminal_screen.dart`. |
+| `lib/services/terminal/clipboard_text.dart` | Clipboard-safe text helpers. `extractSelectionText(terminal, range)` is used for **copy**: it walks the selection row-by-row, strips trailing cell padding, unconditionally strips `\r`, and suppresses the inter-row newline when the rows are a visual continuation of one logical line. Two signals decide "visual wrap": xterm's own `line.isWrapped` flag (authoritative for auto-wrapped text) and a heuristic that catches TUI-drawn wraps (Claude Code / vim / tmux write each row with explicit CUP and never set `isWrapped`, so we also suppress the newline when the previous row's visible content filled the viewport and the current row starts at column 0). `encodeForPaste(terminal, text)` is used for **paste**: it normalizes `\r\n`/lone-`\r` to `\n`, then wraps the payload with `ESC[200~…ESC[201~` when the remote has enabled bracketed paste mode (DECSET 2004 — any modern shell, vim, tmux, Claude Code all enable it on TTY attach). Unit-tested by `test/clipboard_text_test.dart`. |
+| `lib/widgets/terminal/terminal_container.dart` | xterm wrapper with pinch zoom (2-pointer gesture), drag-to-select, double-tap word capture. Font size is owned by the container; a `fontSizeNotifier` (ValueNotifier) lets the AppBar readout rebuild live via `ValueListenableBuilder` without pulling the whole `TerminalScreen` into setState. During a pinch we update the container but do **not** notify the parent per frame — notifying parent per frame was the cause of the "zoom hangs under TUI" bug, since `TerminalScreen.setState` rebuilds the entire screen (keyboard subtree included) and xterm's autoResize recomputes grid metrics every frame. Parent callback fires only on scale-end, explicit zoom buttons, and the first auto-size. Sub-pixel pinch deltas (<0.5 px) are ignored. Also measures the real character-cell pixel size via a `ParagraphBuilder` (same technique as xterm's internal `calcCharSize`) and passes concrete `charWidth` / `lineHeight` to `SelectionHandlesOverlay`, instead of the old 0.6/1.2 font-size ratios that drifted by column 20 on RobotoMono. The `TerminalView` is built with `padding: EdgeInsets.zero` so cell (0,0) is pinned at pixel (0,0) — the overlay shares the same Stack origin. |
 | `lib/widgets/terminal/connection_indicator.dart` | Two related widgets sharing one `statusColor(status, relayReachable)` helper: `ConnectionIndicator` is an 8×8 coloured dot, and `KttyTitle` is the word **KTTY** rendered in the same colour. The previous "Connected" / "Disconnected" text label was removed because it overlapped the font-size +/- buttons on a 360-dp portrait phone — the colour-coded title now carries the status instead. Red = disconnected, orange = connecting, yellow = handshake/sync, blue = relay reachable but idle, green = fully connected. |
-| `lib/widgets/terminal/selection_handles.dart` | Android-style teardrop selection handles overlay with a Copy button. |
+| `lib/widgets/terminal/selection_handles.dart` | Android-style teardrop selection handles overlay with a Copy button. Polls `controller.selection` at 150ms and renders the two handles + a floating toolbar at pixel positions computed from concrete `charWidth` / `lineHeight` passed in by `TerminalContainer` (measured via `ParagraphBuilder`), minus the buffer's scroll offset. Copy routes through `extractSelectionText` (clipboard_text.dart) so multi-row URL selections come out as a single line without phantom newlines. |
 | `lib/widgets/keyboard/custom_keyboard.dart` | The on-screen keyboard. Three layers (ABC, 123, SYM) plus a swipe drawer for arrows/function keys. Sends keys via a callback to `terminal_service`. |
 | `lib/widgets/keyboard/keyboard_layer.dart` | One layer of the keyboard — renders rows of keys. |
 | `lib/widgets/keyboard/key_button.dart` | Single key — handles tap, long-press, swipe, mic (for speech-to-text on Space). |
@@ -315,6 +315,7 @@ what `flutter test` runs). Standalone interop and e2e helpers live under
 |---|---|
 | `test/terminal_service_payload_test.dart` | Unit tests for `TerminalService._handleMessage` and the `looksLikeWireFragment` guardrail. Regression coverage for the "stray `\"payload\":...`" leak — every parse failure must drop + trigger sync recovery, never `terminal.write(raw)`. |
 | `test/terminal_container_zoom_test.dart` | Widget tests for `TerminalContainer` pinch behaviour. Verifies that `onFontSizeChanged` does NOT fire per pinch frame (only on scale-end + explicit zoom buttons), that `onPinchStart`/`onPinchEnd` fire exactly once per gesture, and that `fontSizeNotifier` advances on zoom. Regression coverage for "zoom hangs under TUI". |
+| `test/clipboard_text_test.dart` | Unit tests for `lib/services/terminal/clipboard_text.dart`. 13 cases covering: copy strips `\r` and trailing cell padding, newlines are kept between genuinely separate rows, naturally-wrapped long lines come out whole (xterm `isWrapped` path), TUI-drawn wraps come out whole (heuristic path), paste normalizes `\r\n`/`\r` → `\n`, and paste wraps with `ESC[200~…ESC[201~` iff the remote enabled DECSET 2004. Drives a detached `Terminal` by writing ANSI straight into it — no WS plumbing required. Regression coverage for the Phase 12 clipboard fixes. |
 | `test/widget_test.dart` | Leftover Flutter scaffold smoke test from `flutter create`. Imports a `MyApp` constructor that never existed in this repo — it's been broken since the first commit. Delete or replace when convenient; unrelated to the real test suite. |
 | `tests/cdp_drive.dart` | Chrome DevTools Protocol driver used during local e2e verification of the PWA. Connects to a headless browser on `127.0.0.1:9222`, checks the DOM for any leaked `"payload"` strings, and captures a screenshot. Run manually; not part of `flutter test`. |
 | `tests/mlkem_interop/rust_baseline/src/main.rs` | Rust binary that generates an ML-KEM-768 keypair, encapsulates a shared secret, prints all values as hex. |
@@ -489,11 +490,6 @@ RUSTFLAGS="--remap-path-prefix=$HOME=/h \
   cargo build --release -p ktty-agent --manifest-path backend/Cargo.toml
 cp backend/target/release/ktty-agent run-agent/ktty-agent
 ```
-
-A thinner legacy script `./build-agent.sh` also exists — it copies the
-binary one directory *up* from the repo (`../ktty-agent`). The
-`run-agent/` location is preferred going forward because it keeps
-everything inside the repo.
 
 ### Step 3 — Flutter client
 
@@ -968,7 +964,52 @@ Regression coverage: `test/terminal_service_payload_test.dart`
 (9 cases) and `test/terminal_container_zoom_test.dart` (4 cases).
 All 13 green; run with `flutter test`.
 
-### Phase 12 — picking up where this left off
+### Phase 12 — clipboard: bracketed paste + multi-row copy
+
+Three clipboard bugs surfaced on the PWA in real use with TUIs like
+Claude Code and vim; all fixed in this batch:
+
+1. **Copy-from-TUI silently inserts newlines into URLs.** xterm.dart's
+   stock `buffer.getText(range)` inserts a `\n` between rows whenever
+   the next row is not flagged `isWrapped`. TUIs that drive each
+   visible row with explicit cursor positioning (`CSI row;col H`)
+   never set `isWrapped`, so selecting a URL that visually wraps
+   across rows used to come out of the clipboard with phantom `\n`s
+   in the middle — pasting into a browser was then silently broken.
+   Fix: a new `extractSelectionText` in `lib/services/terminal/`
+   `clipboard_text.dart` walks the segments, respects `isWrapped`,
+   and adds a heuristic that suppresses the inter-row newline when
+   the previous row's visible content filled the viewport and the
+   current row starts at column 0 — the signature of a TUI-drawn
+   visual wrap. `\r` is stripped unconditionally on the way out.
+2. **Selection handles drift from the glyphs they point at.** The
+   overlay used hardcoded 0.6 (width) / 1.2 (height) font-size
+   ratios. The real per-cell width / line-height for a given font
+   size comes from a `ParagraphBuilder` layout (same technique
+   xterm's internal `calcCharSize` uses); `TerminalContainer` now
+   measures it and passes concrete pixels to `SelectionHandlesOverlay`
+   instead of ratios. The `TerminalView` is also pinned to
+   `padding: EdgeInsets.zero` so its content origin matches the
+   overlay's Stack origin, and the overlay subtracts the buffer's
+   scroll offset when converting absolute buffer rows to viewport
+   pixel Y. Both of those together kill the drift.
+3. **Paste clobbers vim / shells with stray newlines and
+   autoindent.** The on-screen keyboard's Paste button used to fire
+   raw `\n`s at the PTY, so vim's autoindent ran per line and
+   shells executed each line as it arrived. Fix: a new
+   `pastePlainText(text)` on `TerminalService` that normalizes
+   `\r\n` / lone-`\r` to `\n` and wraps the payload with
+   `ESC[200~…ESC[201~` (bracketed paste — DECSET 2004) when the
+   remote has enabled it. xterm.dart tracks the DECSET state on
+   the `Terminal` instance (`terminal.bracketedPasteMode`); we
+   gate on that and fall back to plain-text injection when the
+   remote hasn't opted in.
+
+Regression coverage: `test/clipboard_text_test.dart` (13 cases,
+covering both copy and paste paths). All 30 tests green across the
+three suites; run with `flutter test`.
+
+### Phase 13 — picking up where this left off
 
 Future work is in the [Outstanding work](#outstanding-work--known-limitations)
 section below. The two big-ticket items are an HKDF-based key separation

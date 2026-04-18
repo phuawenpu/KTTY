@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:xterm/xterm.dart';
 import '../../config/constants.dart';
 import '../websocket/websocket_service.dart';
+import 'clipboard_text.dart';
 
 /// Rolling-window latency + traffic stats for the terminal session.
 /// Owned by [TerminalService]; surfaced to the user via the info-button
@@ -122,18 +123,34 @@ class TerminalService {
       : terminal = Terminal(maxLines: kTerminalMaxLines),
         controller = TerminalController();
 
-  /// Get the currently selected text from the terminal buffer.
-  String getSelectedText() {
-    final selection = controller.selection;
-    if (selection == null) return '';
-    return terminal.buffer.getText(selection);
-  }
+  /// Get the currently selected text in a form suitable for the
+  /// system clipboard. See [extractSelectionText] for what this
+  /// differs from `terminal.buffer.getText(selection)` — in short, it
+  /// strips `\r`, trims trailing cell padding per row, and suppresses
+  /// the inter-row newline when the rows are a visually-wrapped
+  /// continuation of one logical line. The "long URL wrapped across
+  /// rows in a TUI" case is the motivating example.
+  String getSelectedText() =>
+      extractSelectionText(terminal, controller.selection);
 
   /// Send text directly to the PTY as if the user typed it.
   /// More reliable than terminal.textInput() for injecting words
   /// because it bypasses xterm internals and goes straight to the send buffer.
   void sendText(String text) {
     final bytes = utf8.encode(text);
+    _inputBuffer.addAll(bytes);
+    _inputFlushTimer ??= Timer(_inputFlushInterval, _flushInput);
+  }
+
+  /// Inject a paste into the PTY, honouring bracketed-paste mode if
+  /// the remote app has enabled it (vim, tmux, Claude Code all do).
+  /// Normalizes `\r\n`/`\r` to `\n` first so Windows-origin clipboards
+  /// don't double up on newlines. See [encodeForPaste] for the shape
+  /// of the bytes that go on the wire.
+  void pastePlainText(String text) {
+    if (text.isEmpty) return;
+    final encoded = encodeForPaste(terminal, text);
+    final bytes = utf8.encode(encoded);
     _inputBuffer.addAll(bytes);
     _inputFlushTimer ??= Timer(_inputFlushInterval, _flushInput);
   }
